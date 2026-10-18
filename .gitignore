@@ -1,0 +1,14 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+
+# packaged builds
+*.zip
+*.crx
+*.pem
+
+# files that are not part of the extension
+*.tex

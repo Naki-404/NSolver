@@ -1,0 +1,133 @@
+<div align="center">
+
+<img src="images/128.png" width="96" alt="NSolver">
+
+# NSolver: Coursera Solver / AutoPass
+
+Расширение для Chrome, которое решает тесты Coursera с помощью ИИ и отмечает лекции и материалы курса пройденными.
+
+**made by [Naki](https://github.com/Naki-404/NSolver)** · Manifest V3 · v2.3.0 · [English](#english)
+
+</div>
+
+---
+
+<p align="center">
+  <img src="docs/screenshots/popup-ru-main.png" width="300" alt="Главная вкладка">
+  &nbsp;&nbsp;
+  <img src="docs/screenshots/popup-ru-settings.png" width="300" alt="Настройки">
+</p>
+
+## Возможности
+
+- **Quiz Solver.** Берёт вопросы открытой попытки теста, отправляет их выбранной модели и сам отмечает ответы: одиночный выбор, несколько вариантов (checkbox) и текстовые поля.
+- **Авто-решение.** Тест решается сразу при открытии попытки, без нажатий.
+- **Пропуск материалов.** Отмечает лекции и материалы для чтения пройденными. По желанию отвечает в обсуждениях курса.
+- **Четыре API на выбор:** OctavAPI, Claude API, ChatGPT API и Gemini API. Для каждого хранится свой ключ и своя модель.
+- **Актуальный список моделей.** После сохранения ключа подтягивается полный список моделей прямо из API.
+- **Горячие клавиши.** Назначаются прямо в расширении и сразу работают на странице курса. По умолчанию Quiz Solver запускается по `Alt+K`.
+- **Интерфейс на RU / EN.**
+
+## Установка
+
+1. Скачайте репозиторий: **Code → Download ZIP** и распакуйте архив. Или клонируйте:
+   ```bash
+   git clone https://github.com/Naki-404/NSolver.git
+   ```
+2. Откройте `chrome://extensions` (в Edge `edge://extensions`, в Яндекс Браузере `browser://extensions`).
+3. Включите **Режим разработчика** (переключатель в правом верхнем углу).
+4. Нажмите **Загрузить распакованное расширение** и выберите папку `NSolver` (ту, где лежит `manifest.json`).
+5. Закрепите иконку NSolver на панели браузера через значок пазла.
+
+Нужен Chrome 116 или новее либо другой браузер на Chromium той же версии.
+
+## Быстрый старт
+
+1. Нажмите на иконку NSolver и откройте вкладку **Настройки**.
+2. Выберите **API** и вставьте ключ. Ссылка «Получить ключ ↗» ведёт на страницу ключей выбранного провайдера.
+3. Нажмите **Сохранить**. Расширение проверит ключ и загрузит список моделей.
+4. Выберите модель.
+5. Откройте тест на Coursera и нажмите **Start** или **Resume**.
+6. Нажмите `Alt+K` или кнопку **Решить тест**. Ответы проставятся сами, справа вверху появится уведомление `Naki: Готово…`.
+7. **Проверьте ответы и отправьте тест сами.** Расширение тест не отправляет.
+
+Подробное руководство: **[docs/USAGE.md](docs/USAGE.md)**.
+
+## Провайдеры
+
+| API | Где взять ключ | Модель по умолчанию |
+|---|---|---|
+| OctavAPI | [octavapi.shop](https://octavapi.shop) | `gpt-6-luna` |
+| Claude API | [console.anthropic.com](https://console.anthropic.com/settings/keys) | `claude-opus-5-5` |
+| ChatGPT API | [platform.openai.com](https://platform.openai.com/api-keys) | `gpt-5.5` |
+| Gemini API | [aistudio.google.com](https://aistudio.google.com/app/apikey) | `gemini-3.8-flash` |
+
+Кнопка ↻ рядом с моделью обновляет список с API. Пункт «✎ Другая модель…» позволяет вписать ID модели вручную.
+
+## Горячие клавиши
+
+| Действие | По умолчанию |
+|---|---|
+| Quiz Solver | `Alt+K` |
+| Пропустить материалы | не назначено |
+
+Чтобы поменять: **Настройки → Горячие клавиши**, нажмите на кнопку сочетания и затем нужные клавиши. `Esc` отменяет запись, `×` сбрасывает. Сочетание без Ctrl/Alt (например, просто `K`) не срабатывает, пока вы печатаете в поле ввода.
+
+## Частые проблемы
+
+- **«Вопросы теста не найдены».** Откройте именно попытку теста (Start/Resume) и обновите страницу.
+- **Хоткей не срабатывает.** Кликните по странице курса, чтобы фокус был на ней, и обновите вкладку после переустановки расширения.
+- **«Неверный или неактивный API-ключ».** Проверьте ключ и баланс у провайдера.
+- **Часть ответов не проставилась.** В уведомлении будут номера вопросов: проверьте их вручную.
+
+Больше решений: [docs/USAGE.md#частые-проблемы](docs/USAGE.md#частые-проблемы).
+
+## Приватность
+
+- API-ключи хранятся только в вашем браузере (`chrome.storage.local`).
+- Текст вопросов отправляется только выбранному вами API. Других серверов у расширения нет.
+- Запросы к Coursera идут от вашей сессии на coursera.org, как обычные действия на сайте.
+
+## Важно
+
+- Ответы ИИ могут быть неверными. Проверяйте их перед отправкой.
+- Автоматическое прохождение оцениваемых заданий может нарушать [Honor Code Coursera](https://www.coursera.org/about/terms/honorcode). За использование расширения отвечаете вы сами.
+- Новые курсы могут блокировать автоматическую отметку материалов.
+
+## Структура проекта
+
+```
+NSolver/
+├── manifest.json        # описание расширения (Manifest V3)
+├── background.js        # прокси к AI API, подключение к открытым вкладкам
+├── interceptor.js       # перехват ответов Coursera на странице (MAIN world)
+├── content.js           # Quiz Solver, пропуск материалов, хоткеи, уведомления
+├── model-provider.js    # запросы к OctavAPI / Claude / ChatGPT / Gemini
+├── shared.js            # настройки, хоткеи, переводы RU/EN
+├── popup.html           # окно расширения
+├── panel.js, panel.css  # интерфейс окна
+├── images/              # иконки
+└── docs/                # руководство и скриншоты
+```
+
+История версий: [CHANGELOG.md](CHANGELOG.md).
+
+---
+
+## English
+
+**NSolver: Coursera Solver / AutoPass** is a Chrome extension (Manifest V3) made by [Naki](https://github.com/Naki-404/NSolver). It solves Coursera quizzes with AI and marks lectures and readings as completed.
+
+<p align="center"><img src="docs/screenshots/popup-en-main.png" width="300" alt="Main tab"></p>
+
+**Features:** quiz solver for single choice, multiple choice and text answers; auto-solve when an attempt opens; skip lectures and readings (optionally reply in discussions); four providers (OctavAPI, Claude API, ChatGPT API, Gemini API) with a live model list from the API; in-extension hotkeys (`Alt+K` by default); RU / EN interface.
+
+**Install:** download the ZIP or `git clone`, open `chrome://extensions`, turn on Developer mode, click **Load unpacked** and select the `NSolver` folder.
+
+**Use:** Settings → choose an API, paste a key, **Save**, pick a model. Open a Coursera quiz attempt and press `Alt+K` or **Solve quiz**. Review the answers and submit yourself.
+
+**Privacy:** keys stay in `chrome.storage.local`; questions go only to the API you selected.
+
+**Note:** AI answers can be wrong. Automated completion of graded work may violate the Coursera Honor Code. Use at your own risk.
+
+Full guide (Russian): [docs/USAGE.md](docs/USAGE.md).

@@ -1,0 +1,63 @@
+{
+  "manifest_version": 3,
+  "name": "NSolver: Coursera Solver / AutoPass",
+  "short_name": "NSolver",
+  "version": "2.3.0",
+  "description": "NSolver — Coursera Solver / AutoPass, made by Naki: AI quiz solver (OctavAPI, Claude, ChatGPT, Gemini), hotkeys and content skipping.",
+  "author": "Naki",
+  "homepage_url": "https://github.com/Naki-404/NSolver",
+  "minimum_chrome_version": "116",
+  "permissions": [
+    "storage",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://www.coursera.org/*",
+    "https://octavapi.shop/*",
+    "https://api.anthropic.com/*",
+    "https://api.openai.com/*",
+    "https://generativelanguage.googleapis.com/*"
+  ],
+  "icons": {
+    "16": "images/16.png",
+    "32": "images/32.png",
+    "48": "images/48.png",
+    "128": "images/128.png"
+  },
+  "action": {
+    "default_title": "NSolver — made by Naki",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "images/16.png",
+      "32": "images/32.png",
+      "48": "images/48.png",
+      "128": "images/128.png"
+    }
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.coursera.org/learn/*"
+      ],
+      "js": [
+        "interceptor.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://www.coursera.org/learn/*"
+      ],
+      "js": [
+        "shared.js",
+        "model-provider.js",
+        "content.js"
+      ],
+      "run_at": "document_start"
+    }
+  ]
+}
