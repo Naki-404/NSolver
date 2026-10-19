@@ -5,7 +5,8 @@ var Naki = (function () {
         SKIP: 'naki:skip',
         STATUS: 'naki:status',
         API_REQUEST: 'naki:api-request',
-        RELAY: 'naki:relay'
+        RELAY: 'naki:relay',
+        AUTOPILOT: 'naki:autopilot'
     };
 
     const PROVIDER_IDS = ['octava', 'anthropic', 'openai', 'gemini'];
@@ -18,6 +19,7 @@ var Naki = (function () {
         autoSolve: false,
         skipDiscussions: false,
         netacadButton: true,
+        autopilotRetakes: 2, // automatic retakes of a failed quiz: 0 (leave it to the user), 2 or 3
         hotkeys: {
             solve: { code: 'KeyK', key: 'K', alt: true, ctrl: false, shift: false, meta: false },
             skip: null
@@ -31,6 +33,7 @@ var Naki = (function () {
         settings.hotkeys = { ...DEFAULT_SETTINGS.hotkeys, ...stored.hotkeys };
         if (!PROVIDER_IDS.includes(settings.provider)) settings.provider = 'octava';
         if (settings.lang !== 'en') settings.lang = 'ru';
+        if (![0, 2, 3].includes(settings.autopilotRetakes)) settings.autopilotRetakes = DEFAULT_SETTINGS.autopilotRetakes;
         return settings;
     }
 
@@ -130,6 +133,21 @@ var Naki = (function () {
             netacadSkipDone: 'Готово: {summary}. Обновите страницу курса, чтобы увидеть прогресс.',
             netacadSkipNothing: 'Материалы курса не найдены. Откройте модуль курса и повторите.',
             netacadSkipComponents: 'компоненты', netacadSkipVideos: 'видео',
+            // quiz autopilot
+            autopilotTitle: 'Автосолвер квизов', autopilotRun: 'Пройти весь курс', autopilotConfirm: 'Нажмите ещё раз: квизы будут отправлены',
+            autopilotHint: 'Все квизы курса по порядку, с отправкой. NetAcad: ещё и материалы; экзамены не трогаются',
+            autopilotRetakes: 'Если квиз не сдан', autopilotRetakes0: 'Не пересдавать', autopilotRetakes2: '2 пересдачи', autopilotRetakes3: '3 пересдачи',
+            autopilotBusy: 'Автосолвер уже работает…',
+            autopilotStopped: 'Автосолвер остановлен.', autopilotStopping: 'Автосолвер остановится после текущего модуля.',
+            autopilotNoCourse: 'Откройте курс в плеере NetAcad (netacad.com/launch…) и повторите.',
+            autopilotModule: 'Автосолвер — модуль {n} из {total}: {title}…',
+            autopilotNotOpened: 'модуль не открылся',
+            autopilotDone: 'Готово: модулей {modules}, квизов сдано {passed}, не сдано {failed}, материалов засчитано {materials}.',
+            autopilotNoQuizzes: 'В курсе нет квизов для автосолвера.',
+            autopilotItem: 'Автосолвер — {n} из {total}: {title}…',
+            autopilotCourseraDone: 'Готово: квизов сдано {passed}, не сдано {failed}.',
+            autopilotStuck: 'не нашёл кнопку «{step}»',
+            statusAutopilot: 'Автосолвер проходит курс…',
             // content script
             toastBusySolve: 'Quiz Solver уже работает…',
             toastNoKey: 'Нужен API-ключ: откройте панель расширения → Настройки.',
@@ -198,6 +216,20 @@ var Naki = (function () {
             netacadSkipDone: 'Done: {summary}. Reload the course page to see progress.',
             netacadSkipNothing: 'No course materials found. Open a course module and try again.',
             netacadSkipComponents: 'components', netacadSkipVideos: 'videos',
+            autopilotTitle: 'Quiz autopilot', autopilotRun: 'Go through the course', autopilotConfirm: 'Click again: quizzes will be submitted',
+            autopilotHint: 'Every quiz of the course in order, submitted. NetAcad: materials too; exams are left alone',
+            autopilotRetakes: 'If a quiz is failed', autopilotRetakes0: 'No retakes', autopilotRetakes2: '2 retakes', autopilotRetakes3: '3 retakes',
+            autopilotBusy: 'The autopilot is already running…',
+            autopilotStopped: 'The autopilot was stopped.', autopilotStopping: 'The autopilot will stop after the current module.',
+            autopilotNoCourse: 'Open the course in the NetAcad player (netacad.com/launch…) and try again.',
+            autopilotModule: 'Autopilot — module {n} of {total}: {title}…',
+            autopilotNotOpened: 'module did not open',
+            autopilotDone: 'Done: {modules} modules, {passed} quizzes passed, {failed} failed, {materials} materials completed.',
+            autopilotNoQuizzes: 'The course has no quizzes for the autopilot.',
+            autopilotItem: 'Autopilot — {n} of {total}: {title}…',
+            autopilotCourseraDone: 'Done: {passed} quizzes passed, {failed} failed.',
+            autopilotStuck: 'could not find the "{step}" button',
+            statusAutopilot: 'The autopilot is going through the course…',
             toastBusySolve: 'Quiz Solver is already running…',
             toastNoKey: 'An API key is required: open the extension panel → Settings.',
             toastNoQuestions: 'No quiz questions found. Open a quiz attempt (Start/Resume) and reload the page if needed.',

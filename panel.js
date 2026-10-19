@@ -56,6 +56,19 @@
                 </div>
             </section>
 
+            <section class="card" id="autopilotCard">
+                <div class="card-title"><h2 data-i18n="autopilotTitle"></h2></div>
+                <button class="btn" id="autopilot" type="button">${ICONS.bolt}<span class="btn-label" data-i18n="autopilotRun"></span></button>
+                <div class="row">
+                    <label class="label-text" for="autopilotRetakes"><span data-i18n="autopilotRetakes"></span><small data-i18n="autopilotHint"></small></label>
+                    <select id="autopilotRetakes" class="compact-select">
+                        <option value="0" data-i18n="autopilotRetakes0"></option>
+                        <option value="2" data-i18n="autopilotRetakes2"></option>
+                        <option value="3" data-i18n="autopilotRetakes3"></option>
+                    </select>
+                </div>
+            </section>
+
             <section class="card" id="netacadCard" hidden>
                 <div class="card-title"><h2>Cisco NetAcad</h2></div>
                 <div class="row">
@@ -207,7 +220,8 @@
             const result = await sendToTab({ type: Naki.MSG.STATUS });
             if (!result?.ok) throw new Error('no status');
             showSite(result.site);
-            if (result.solving) setStatus('busy', 'statusSolving');
+            if (result.autopilot) setStatus('busy', 'statusAutopilot');
+            else if (result.solving) setStatus('busy', 'statusSolving');
             else if (result.site === 'netacad') setStatus(result.skipping ? 'busy' : 'ready', result.skipping ? 'statusSkipping' : 'statusNetacad');
             else if (result.solving) setStatus('busy', 'statusSolving');
             else if (result.skipping) setStatus('busy', 'statusSkipping');
@@ -249,6 +263,33 @@
         runAction($('solve'), Naki.MSG.SOLVE);
     });
     $('skip').addEventListener('click', () => runAction($('skip'), Naki.MSG.SKIP));
+
+    // The autopilot submits quizzes: the first click only arms the button, the second one starts it.
+    let autopilotArmed = null;
+    $('autopilot').addEventListener('click', () => {
+        const label = $('autopilot').querySelector('.btn-label');
+        if (!autopilotArmed) {
+            label.dataset.i18n = 'autopilotConfirm';
+            label.textContent = tr('autopilotConfirm');
+            autopilotArmed = setTimeout(() => {
+                autopilotArmed = null;
+                label.dataset.i18n = 'autopilotRun';
+                label.textContent = tr('autopilotRun');
+            }, 4000);
+            return;
+        }
+        clearTimeout(autopilotArmed);
+        autopilotArmed = null;
+        label.dataset.i18n = 'autopilotRun';
+        if (!Naki.activeKey(settings)) {
+            showTab('settings');
+            setKeyMessage('keyFirst', 'error');
+            $('apiKey').focus();
+            return;
+        }
+        runAction($('autopilot'), Naki.MSG.AUTOPILOT);
+    });
+    $('autopilotRetakes').addEventListener('change', () => Naki.saveSettings({ autopilotRetakes: Number($('autopilotRetakes').value) }));
 
     // ------------------------------------------------------------------ settings: provider, model, key
 
@@ -297,6 +338,7 @@
         $('autoSolve').checked = settings.autoSolve;
         $('skipDiscussions').checked = settings.skipDiscussions;
         $('netacadButton').checked = settings.netacadButton;
+        $('autopilotRetakes').value = String(settings.autopilotRetakes);
         renderModelSelect();
         renderKeyMessage();
     }

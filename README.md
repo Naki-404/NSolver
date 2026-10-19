@@ -6,7 +6,7 @@
 
 Расширение для Chrome, которое решает тесты Coursera и Cisco NetAcad с помощью ИИ и отмечает лекции и материалы Coursera пройденными.
 
-**made by [Naki](https://github.com/Naki-404/NSolver)** · Manifest V3 · v2.6.0 · [English](#english)
+**made by [Naki](https://github.com/Naki-404/NSolver)** · Manifest V3 · v2.7.0 · [English](#english)
 
 </div>
 
@@ -24,6 +24,7 @@
 - **Авто-решение.** Тест решается сразу при открытии попытки, без нажатий.
 - **Cisco NetAcad.** NSolver читает текст вопросов прямо со страницы курса (включая фреймы и Shadow DOM), отправляет модели только текст и сам отмечает ответы: один или несколько вариантов, выпадающие списки, текстовые поля. Запуск: плавающая кнопка **Решить**, `Alt+K` или кнопка в окне расширения.
 - **Пропуск материалов.** Coursera: отмечает лекции и материалы для чтения пройденными, по желанию отвечает в обсуждениях. NetAcad: проходит весь курс, все модули подряд, примерно за минуту (экзамены и тесты не трогает).
+- **Автосолвер квизов.** Одна кнопка проходит весь курс: открывает модули по очереди, решает и отправляет квизы, при неудаче пересдаёт (2 или 3 раза — на ваш выбор). NetAcad: ответы из данных курса, экзамены не трогает. Coursera: ответы модели, Honor Code отмечает сам.
 - **Четыре API на выбор:** OctavAPI, Claude API, ChatGPT API и Gemini API. Для каждого хранится свой ключ и своя модель.
 - **Актуальный список моделей.** После сохранения ключа подтягивается полный список моделей прямо из API.
 - **Горячие клавиши.** Назначаются прямо в расширении и сразу работают на странице курса. По умолчанию Quiz Solver запускается по `Alt+K`.
@@ -115,7 +116,7 @@ NSolver/
 ├── interceptor.js       # перехват ответов Coursera на странице (MAIN world)
 ├── content.js           # Coursera: Quiz Solver, пропуск материалов, хоткеи, уведомления
 ├── netacad.js           # Cisco NetAcad: вопросы из DOM, автоответы, пропуск курса, кнопка, хоткеи
-├── netacad-main.js      # NetAcad, мир страницы: отметка материалов модуля через движок курса (Adapt)
+├── netacad-main.js      # NetAcad, мир страницы: материалы и квизы модуля через движок курса (Adapt)
 ├── model-provider.js    # запросы к OctavAPI / Claude / ChatGPT / Gemini
 ├── shared.js            # настройки, хоткеи, переводы RU/EN
 ├── popup.html           # окно расширения
@@ -134,7 +135,7 @@ NSolver/
 
 <p align="center"><img src="docs/screenshots/popup-en-main.png" width="300" alt="Main tab"></p>
 
-**Features:** quiz solver for single choice, multiple choice and text answers; auto-solve when an attempt opens; Cisco NetAcad mode that reads the questions as text from the course page and selects the answers itself (floating **Solve** button, `Alt+K` or the popup button); skip materials (Coursera: lectures and readings, optionally discussions; NetAcad: every module of the course in about a minute, exams left alone); four providers (OctavAPI, Claude API, ChatGPT API, Gemini API) with a live model list from the API; in-extension hotkeys (`Alt+K` by default); RU / EN interface.
+**Features:** quiz solver for single choice, multiple choice and text answers; auto-solve when an attempt opens; Cisco NetAcad mode that reads the questions as text from the course page and selects the answers itself (floating **Solve** button, `Alt+K` or the popup button); skip materials (Coursera: lectures and readings, optionally discussions; NetAcad: every module of the course in about a minute, exams left alone); four providers (OctavAPI, Claude API, ChatGPT API, Gemini API) with a live model list from the API; a quiz autopilot that goes through every module and submits the quizzes (NetAcad answers from the course data, Coursera answers from the model; optional automatic retakes); in-extension hotkeys (`Alt+K` by default); RU / EN interface.
 
 **Install:** download the ZIP or `git clone`, open `chrome://extensions`, turn on Developer mode, click **Load unpacked** and select the `NSolver` folder.
 

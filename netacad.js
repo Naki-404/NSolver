@@ -427,14 +427,15 @@
         return solution.content || '';
     }
 
+    // Returns true when at least one answer was selected (the quiz autopilot relies on it).
     async function solve() {
         if (state.solving) {
             ui.show('info', tr('toastBusySolve'), { duration: 2500 });
-            return;
+            return false;
         }
         if (!Naki.activeKey(state.settings)) {
             ui.show('error', tr('toastNoKey'), { duration: 8000 });
-            return;
+            return false;
         }
         state.solving = true;
         ui.render();
@@ -443,7 +444,7 @@
             console.log('[Naki] NetAcad questions:', questions.map(({ apply, ...q }) => q));
             if (!questions.length) {
                 ui.show('info', tr('netacadNoQuestions'), { duration: 8000 });
-                return;
+                return false;
             }
             const settings = state.settings;
             const options = { provider: settings.provider, apiKey: Naki.activeKey(settings), modelId: Naki.activeModel(settings), lang: settings.lang };
@@ -471,9 +472,11 @@
             } else {
                 ui.show('success', tr('toastDone', { applied, sec }), { duration: 8000 });
             }
+            return applied > 0;
         } catch (error) {
             console.error('[Naki] NetAcad solver error:', error);
             ui.show('error', tr('toastSolveError', { error: error.message }));
+            return false;
         } finally {
             state.solving = false;
             ui.render();
@@ -625,7 +628,7 @@
     const MAIN_CHANNEL = 'naki-netacad-main';
     let mainRequestId = 0;
 
-    function askMain(request, timeoutMs) {
+    function askMain(request, timeoutMs, options) {
         return new Promise(resolve => {
             const id = ++mainRequestId;
             const timer = setTimeout(() => done(null), timeoutMs);
@@ -638,7 +641,7 @@
                 if (event.source === window && event.data?.channel === MAIN_CHANNEL && event.data.reply === id) done(event.data.result);
             }
             window.addEventListener('message', onMessage);
-            window.postMessage({ channel: MAIN_CHANNEL, request, id }, window.location.origin);
+            window.postMessage({ channel: MAIN_CHANNEL, request, id, options }, window.location.origin);
         });
     }
 
@@ -733,6 +736,68 @@
         }
     }
 
+    // ------------------------------------------------------------------ quiz autopilot
+    // Module by module: mark the materials complete, then pass every "Check Your Understanding" and module quiz
+    // (netacad-main.js answers from the course data, retakes failed attempts as set in the panel).
+    // Checkpoint / final exams are never opened (outlineModules() lists modules only).
+
+    async function autopilot() {
+        if (state.autopilot) {
+            // A second press stops the run after the current module.
+            state.autopilotStop = true;
+            ui.show('info', tr('autopilotStopping'), { duration: 6000 });
+            return;
+        }
+        state.autopilot = true;
+        state.autopilotStop = false;
+        try {
+            const current = await askMain('status', 3000);
+            if (!current?.ready) {
+                ui.show('error', tr('autopilotNoCourse'), { duration: 10000 });
+                return;
+            }
+            const retakes = state.settings.autopilotRetakes;
+            const outline = outlineModules().filter(module => module.percent === null || module.percent < 100);
+            const modules = outlineModules().length ? outline : [null]; // a course frame without the player outline
+            const summary = { modules: 0, materials: 0, passed: 0, failed: [] };
+            for (const [i, module] of modules.entries()) {
+                if (state.autopilotStop) break;
+                const title = module ? module.title : current.title;
+                ui.show('info', tr('autopilotModule', { n: i + 1, total: modules.length, title }));
+                if (module && !await openModule(module)) {
+                    summary.failed.push(`${title}: ${tr('autopilotNotOpened')}`);
+                    continue;
+                }
+                const materials = await askMain('complete', 120000);
+                summary.materials += materials?.done || 0;
+                const quizzes = await askMain('quizzes', 30 * 60 * 1000, { retakes });
+                for (const quiz of quizzes?.results || []) {
+                    if (quiz.pass) summary.passed++;
+                    else summary.failed.push(`${quiz.title || title}: ${quiz.percent || 0}%${quiz.error ? ` (${quiz.error})` : ''}`);
+                }
+                summary.modules++;
+                await sleep(1000); // let the player send its tracking statements before the next module loads
+            }
+            console.log('[Naki] NetAcad autopilot:', summary);
+            const message = tr('autopilotDone', { modules: summary.modules, passed: summary.passed, failed: summary.failed.length, materials: summary.materials });
+            ui.show(summary.failed.length ? 'info' : 'success', message, { lines: summary.failed.map((text, i) => ({ n: i + 1, text })) });
+        } catch (error) {
+            console.error('[Naki] NetAcad autopilot error:', error);
+            ui.show('error', tr('toastSolveError', { error: error.message }));
+        } finally {
+            state.autopilot = false;
+        }
+    }
+
+    // netacad-main.js asks for the AI solver when a quiz question has no answer data.
+    if (isTop) {
+        window.addEventListener('message', async event => {
+            if (event.source !== window || event.data?.channel !== MAIN_CHANNEL || event.data.event !== 'need-ai') return;
+            const ok = await solve().catch(() => false);
+            window.postMessage({ channel: MAIN_CHANNEL, aiDone: event.data.questionId, ok }, window.location.origin);
+        });
+    }
+
     // Fallback for pages without Adapt models: goes through the components on the screen like a person would.
     async function skipCurrentPage() {
         const roots = collectRoots();
@@ -816,6 +881,7 @@
     function handle(type) {
         if (type === Naki.MSG.SOLVE) solve();
         else if (type === Naki.MSG.SKIP) skipMaterials();
+        else if (type === Naki.MSG.AUTOPILOT) autopilot();
     }
 
     // ------------------------------------------------------------------ messaging & settings
@@ -831,11 +897,12 @@
             switch (message?.type) {
                 case Naki.MSG.SOLVE:
                 case Naki.MSG.SKIP:
+                case Naki.MSG.AUTOPILOT:
                     handle(message.type);
                     sendResponse({ ok: true });
                     break;
                 case Naki.MSG.STATUS:
-                    sendResponse({ ok: true, site: 'netacad', solving: state.solving, skipping: state.skipping });
+                    sendResponse({ ok: true, site: 'netacad', solving: state.solving, skipping: state.skipping, autopilot: !!state.autopilot });
                     break;
             }
         });

@@ -16,7 +16,8 @@
         questionsSignature: '',
         lastAutoSolvedSignature: '',
         solving: false,
-        skipping: false
+        skipping: false,
+        autopilot: false
     };
 
     const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -78,20 +79,22 @@
 
     // ------------------------------------------------------------------ page data
 
-    function readUserId() {
+    function readUserData() {
         for (const script of document.getElementsByTagName('script')) {
             const text = script.textContent;
             if (!text || !text.includes('window.App')) continue;
             const match = text.match(/window\.App\s*=\s*(\{.*?\});/s);
             if (!match) continue;
             try {
-                return JSON.parse(match[1])?.context?.dispatcher?.stores?.ApplicationStore?.userData?.id || null;
+                return JSON.parse(match[1])?.context?.dispatcher?.stores?.ApplicationStore?.userData || null;
             } catch (e) {
                 return null;
             }
         }
         return null;
     }
+
+    const readUserId = () => readUserData()?.id || null;
 
     function courseSlug() {
         return window.location.pathname.match(/\/learn\/([^/]+)/)?.[1] || null;
@@ -278,16 +281,17 @@
 
     // ------------------------------------------------------------------ quiz solver
 
+    // Returns the number of answered questions (0 when nothing was solved).
     async function solveQuiz({ auto = false } = {}) {
         if (state.solving) {
             toast(tr('toastBusySolve'), 'info', 2500);
-            return;
+            return 0;
         }
         state.solving = true;
         try {
             if (!Naki.activeKey(state.settings)) {
                 toast(tr('toastNoKey'), 'error');
-                return;
+                return 0;
             }
             if (!state.questions.length) {
                 requestReplay();
@@ -295,7 +299,7 @@
             }
             if (!state.questions.length) {
                 toast(tr('toastNoQuestions'), 'info', 6000);
-                return;
+                return 0;
             }
 
             const questions = state.questions;
@@ -318,9 +322,11 @@
             } else {
                 toast(tr('toastDone', { applied, sec: seconds }), 'success', 6000);
             }
+            return applied;
         } catch (error) {
             console.error('[Naki] Quiz solver error:', error);
             toast(tr('toastSolveError', { error: error.message }), 'error', 8000);
+            return 0;
         } finally {
             state.solving = false;
         }
@@ -491,6 +497,284 @@
         }
     }
 
+    // ------------------------------------------------------------------ quiz autopilot
+    // Goes through every quiz of the course (graded "exam" and practice "quiz" items) in course order: opens it,
+    // starts an attempt, solves it, accepts the Honor Code, submits, reads the grade and retakes a failed quiz as set
+    // in the panel. Coursera loads a new page per item, so the run lives in chrome.storage.local and resumes on load.
+
+    const AUTOPILOT_KEY = 'nakiAutopilot';
+    const QUIZ_TYPES = ['exam', 'quiz'];
+    const STEP_MS = 1500;
+    const STUCK_MS = 45000; // a step that makes no progress for this long is given up, the run moves on
+    const BUTTONS = {
+        start: /^(start|start quiz|start assignment|resume|resume assignment|continue|continue assignment|начать|начать тест|продолжить|возобновить)$/i,
+        retry: /^(try again|retry|retake|retake quiz|retake assignment|start new attempt|new attempt|повторить|повторить попытку|пройти снова|начать заново)$/i,
+        submit: /^(submit|submit quiz|submit assignment|отправить|отправить тест)$/i
+    };
+    const HONOR_TEXT = /honor code|isn.t my own|not my own|understand that submitting|кодекс|не являющ|моей собственной/i;
+
+    // A stopped run is remembered by id, so a step that was already in flight cannot save it back.
+    const STOP_KEY = 'nakiAutopilotStop';
+
+    async function loadRun() {
+        const stored = await chrome.storage.local.get([AUTOPILOT_KEY, STOP_KEY]);
+        const run = stored[AUTOPILOT_KEY] || null;
+        if (run && stored[STOP_KEY] === run.id) {
+            await chrome.storage.local.remove(AUTOPILOT_KEY);
+            return null;
+        }
+        return run;
+    }
+
+    async function saveRun(run) {
+        const { [STOP_KEY]: stopped } = await chrome.storage.local.get(STOP_KEY);
+        if (stopped === run.id) return;
+        await chrome.storage.local.set({ [AUTOPILOT_KEY]: run });
+    }
+
+    const clearRun = () => chrome.storage.local.remove(AUTOPILOT_KEY);
+
+    async function stopRun(run) {
+        await chrome.storage.local.set({ [STOP_KEY]: run.id });
+        await clearRun();
+    }
+    const isShown = el => !!el && el.getClientRects().length > 0;
+    const buttonText = el => (el.textContent || el.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
+
+    function findButton(pattern, scope = document) {
+        return [...scope.querySelectorAll('button, a[role="button"], [role="button"]')]
+            .find(el => isShown(el) && !el.disabled && el.getAttribute('aria-disabled') !== 'true' && pattern.test(buttonText(el)));
+    }
+
+    const itemPath = (run, item) => `/learn/${run.slug}/${item.type}/${item.id}`;
+    const itemUrl = (run, item) => `https://www.coursera.org${itemPath(run, item)}/${item.slug || ''}`;
+
+    // Quizzes in course order (modules → lessons → items); falls back to the API order.
+    function courseQuizzes(materials) {
+        const items = materialItems(materials);
+        const byId = new Map(items.map(item => [item.id, item]));
+        const linked = materials?.linked || {};
+        const modules = Object.entries(linked).find(([key]) => /^onDemandCourseMaterialModules\.v\d+$/i.test(key))?.[1] || [];
+        const lessons = new Map((Object.entries(linked).find(([key]) => /^onDemandCourseMaterialLessons\.v\d+$/i.test(key))?.[1] || []).map(lesson => [lesson.id, lesson]));
+        const moduleOrder = materials?.elements?.[0]?.moduleIds || modules.map(module => module.id);
+        const ordered = [];
+        for (const moduleId of moduleOrder) {
+            const module = modules.find(m => m.id === moduleId);
+            for (const lessonId of module?.lessonIds || []) {
+                for (const itemId of lessons.get(lessonId)?.itemIds || []) if (byId.has(itemId)) ordered.push(byId.get(itemId));
+            }
+        }
+        return (ordered.length ? ordered : items)
+            .filter(item => QUIZ_TYPES.includes(item.contentSummary?.typeName) && !item.isLocked)
+            .map(item => ({ id: item.id, slug: item.slug, type: item.contentSummary.typeName, name: item.name }));
+    }
+
+    // Grade on the cover / feedback page: "Your grade 85%", "To pass 80% or higher", "Congratulations! You passed!".
+    function readGrade() {
+        const text = document.body?.innerText || '';
+        const percent = text.match(/(?:your grade|latest submission grade|grade received|highest score|ваша оценка|оценка за последнюю|полученная оценка)[^\d%]{0,40}(\d{1,3}(?:[.,]\d+)?)\s*%/i);
+        const needed = text.match(/(?:to pass|для прохождения|чтобы сдать)[^\d%]{0,20}(\d{1,3})\s*%/i);
+        const passedText = /congratulations|you passed|passed!|поздравляем|вы сдали|пройдено успешно/i.test(text);
+        const failedText = /try again once you are ready|did not pass|didn.t pass|not passed|вы не сдали|не пройдено/i.test(text);
+        if (!percent && !passedText && !failedText) return null;
+        const value = percent ? Number(percent[1].replace(',', '.')) : null;
+        const pass = value !== null && needed ? value >= Number(needed[1]) : passedText && !failedText;
+        return { percent: value, pass };
+    }
+
+    function acceptHonorCode() {
+        for (const box of document.querySelectorAll('input[type="checkbox"]')) {
+            const text = (box.closest('label') || box.labels?.[0] || box.parentElement)?.textContent || '';
+            if (HONOR_TEXT.test(text) && !box.checked) box.click();
+        }
+        const nameField = [...document.querySelectorAll('input[type="text"], input:not([type])')]
+            .find(input => /legal name|full name|your name|ваше имя|полное имя|юридическое имя/i.test(`${input.placeholder} ${input.getAttribute('aria-label') || ''}`));
+        const fullName = readUserData()?.fullName;
+        if (nameField && !nameField.value && fullName) setNativeValue(nameField, fullName);
+    }
+
+    let runToast = null;
+    function showRun(run, message, type = 'info', duration = 0) {
+        runToast = runToast ? runToast.update(message, type, duration) : toast(message, type, duration);
+        state.autopilot = !!run;
+    }
+
+    async function nextItem(run, result) {
+        if (result) run.results.push(result);
+        run.index++;
+        run.attempt = 0;
+        run.phase = 'open';
+        run.phaseAt = Date.now();
+        await saveRun(run);
+    }
+
+    async function finishRun(run) {
+        await clearRun();
+        const passed = run.results.filter(result => result.pass).length;
+        const failed = run.results.filter(result => !result.pass);
+        const details = failed.map(result => `${result.name}: ${result.percent ?? '?'}%${result.note ? ` (${result.note})` : ''}`).join('; ');
+        showRun(null, tr('autopilotCourseraDone', { passed, failed: failed.length }) + (details ? ` ${details}` : ''), failed.length ? 'info' : 'success', 20000);
+        runToast = null;
+        state.autopilot = false;
+        console.log('[Naki] Coursera autopilot finished:', run.results);
+    }
+
+    async function startAutopilot() {
+        const running = await loadRun();
+        if (running) {
+            // A second press stops the run.
+            await stopRun(running);
+            showRun(null, tr('autopilotStopped'), 'info', 6000);
+            runToast = null;
+            return;
+        }
+        if (!Naki.activeKey(state.settings)) {
+            toast(tr('toastNoKey'), 'error');
+            return;
+        }
+        const slug = courseSlug();
+        if (!slug) {
+            toast(tr('toastNoCourse'), 'error');
+            return;
+        }
+        let materials = state.courseMaterials;
+        if (!materials) materials = await fetchCourseMaterials(slug).catch(() => null);
+        const items = materials ? courseQuizzes(materials) : [];
+        if (!items.length) {
+            toast(tr('autopilotNoQuizzes'), 'info', 8000);
+            return;
+        }
+        const run = { id: String(Date.now()), slug, items, index: 0, attempt: 0, phase: 'open', phaseAt: Date.now(), retakes: state.settings.autopilotRetakes, results: [] };
+        await saveRun(run);
+        console.log('[Naki] Coursera autopilot:', items);
+        runLoop();
+    }
+
+    let stepping = false;
+    async function autopilotStep() {
+        if (stepping || !alive()) return;
+        stepping = true;
+        try {
+            const run = await loadRun();
+            state.autopilot = !!run;
+            if (!run || run.slug !== courseSlug()) return;
+            const item = run.items[run.index];
+            if (!item) {
+                await finishRun(run);
+                return;
+            }
+            showRun(run, tr('autopilotItem', { n: run.index + 1, total: run.items.length, title: item.name }));
+            if (!location.pathname.startsWith(itemPath(run, item))) {
+                if (run.phase !== 'navigating' || Date.now() - run.phaseAt > 20000) {
+                    run.phase = 'navigating';
+                    run.phaseAt = Date.now();
+                    await saveRun(run);
+                    location.assign(itemUrl(run, item));
+                }
+                return;
+            }
+            if (Date.now() - run.phaseAt > STUCK_MS && run.phase !== 'submitted') {
+                console.warn('[Naki] Autopilot stuck on', item.name, run.phase);
+                await nextItem(run, { name: item.name, pass: false, percent: null, note: tr('autopilotStuck', { step: run.phase }) });
+                return;
+            }
+            if (isAttemptPage()) await attemptStep(run, item);
+            else await coverStep(run, item);
+        } catch (error) {
+            console.error('[Naki] Autopilot step failed:', error);
+        } finally {
+            stepping = false;
+        }
+    }
+
+    async function coverStep(run, item) {
+        if (run.phase === 'submitted') {
+            const grade = readGrade();
+            if (!grade) {
+                if (Date.now() - run.phaseAt > STUCK_MS) await nextItem(run, { name: item.name, pass: false, percent: null, note: tr('autopilotStuck', { step: 'grade' }) });
+                return;
+            }
+            if (grade.pass || run.attempt >= 1 + run.retakes) {
+                await nextItem(run, { name: item.name, ...grade, attempts: run.attempt });
+                return;
+            }
+            run.phase = 'retry';
+            run.phaseAt = Date.now();
+            await saveRun(run);
+        }
+        if (run.phase === 'open' || run.phase === 'navigating') {
+            await sleep(1500); // let the cover page render its grade
+            const grade = readGrade();
+            if (grade?.pass) {
+                await nextItem(run, { name: item.name, ...grade, attempts: 0, note: 'already passed' });
+                return;
+            }
+        }
+        if (run.phase === 'starting' && Date.now() - run.phaseAt < 8000) return; // the attempt is opening
+        const button = findButton(run.phase === 'retry' ? BUTTONS.retry : BUTTONS.start) || findButton(BUTTONS.start) || findButton(BUTTONS.retry);
+        if (!button) return; // the page is still loading; STUCK_MS ends the wait
+        state.questions = [];
+        state.questionsSignature = '';
+        if (run.phase !== 'starting') {
+            run.attempt++; // a repeated click on the same attempt is not a new attempt
+            run.phaseAt = Date.now();
+        }
+        run.phase = 'starting';
+        await saveRun(run);
+        button.click();
+        await sleep(1500);
+        // Timed quizzes ask for confirmation in a dialog.
+        const dialog = document.querySelector('[role="dialog"], .rc-Modal');
+        const confirm = dialog && (findButton(BUTTONS.start, dialog) || findButton(BUTTONS.retry, dialog));
+        if (confirm) confirm.click();
+    }
+
+    async function attemptStep(run, item) {
+        if (run.phase === 'submitting' || run.phase === 'submitted') return; // waiting for the feedback page
+        if (!state.questions.length) {
+            requestReplay();
+            return; // questions arrive with the attempt data; STUCK_MS ends the wait
+        }
+        if (run.phase !== 'solving') {
+            run.phase = 'solving';
+            run.phaseAt = Date.now();
+            await saveRun(run);
+        }
+        const answered = await solveQuiz({ auto: true });
+        if (!answered) return;
+        await sleep(800);
+        acceptHonorCode();
+        await sleep(500);
+        const submit = findButton(BUTTONS.submit);
+        if (!submit) return;
+        run.phase = 'submitting';
+        run.phaseAt = Date.now();
+        await saveRun(run);
+        submit.click();
+        await sleep(1500);
+        const dialog = document.querySelector('[role="dialog"], .rc-Modal');
+        const confirm = dialog && findButton(BUTTONS.submit, dialog);
+        if (confirm) confirm.click();
+        run.phase = 'submitted';
+        run.phaseAt = Date.now();
+        await saveRun(run);
+    }
+
+    let loopTimer = null;
+    function runLoop() {
+        if (loopTimer) return;
+        loopTimer = setInterval(async () => {
+            if (!alive() || !(await loadRun())) {
+                clearInterval(loopTimer);
+                loopTimer = null;
+                state.autopilot = false;
+                return;
+            }
+            autopilotStep();
+        }, STEP_MS);
+        autopilotStep();
+    }
+
     // ------------------------------------------------------------------ hotkeys
 
     function isEditableTarget(target) {
@@ -525,6 +809,10 @@
                 skipContent();
                 sendResponse({ ok: true });
                 break;
+            case Naki.MSG.AUTOPILOT:
+                startAutopilot();
+                sendResponse({ ok: true });
+                break;
             case Naki.MSG.STATUS:
                 sendResponse({
                     ok: true,
@@ -532,6 +820,7 @@
                     onAttempt: isAttemptPage(),
                     solving: state.solving,
                     skipping: state.skipping,
+                    autopilot: !!state.autopilot,
                     courseLoaded: !!state.courseMaterials
                 });
                 break;
@@ -549,6 +838,7 @@
     Naki.loadSettings().then(settings => {
         state.settings = settings;
         requestReplay();
+        loadRun().then(run => { if (run) runLoop(); }); // resume a quiz autopilot run after a page load
     });
     console.log('[Naki] NSolver loaded — made by Naki: https://github.com/Naki-404/NSolver');
 })();

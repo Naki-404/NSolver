@@ -92,12 +92,237 @@
         return { ready: true, done, failed, total: targets.length };
     }
 
+    // ---------------------------------------------------------------- quizzes (Adapt assessments)
+    // Every "Check Your Understanding" and module quiz is an article with _assessment._isEnabled. Flow verified on
+    // NetAcad: Start → one question at a time (answer + Submit arrow) → "Submit My Assessment" (confirm checkbox +
+    // Submit) → results (Reset for another attempt). The correct options are in the course data
+    // (_items[]._shouldBeSelected); other questions are handed to the extension's AI solver (netacad.js).
+
+    const visible = el => el.getClientRects().length > 0 && el.getBoundingClientRect().width > 0;
+
+    function allElements(doc) {
+        const out = [];
+        const stack = [doc];
+        while (stack.length) {
+            const root = stack.pop();
+            for (const el of root.querySelectorAll('*')) {
+                out.push(el);
+                if (el.shadowRoot) stack.push(el.shadowRoot);
+            }
+        }
+        return out;
+    }
+
+    const findDeep = (doc, test) => allElements(doc).find(test);
+    const modelId = el => (el.model && typeof el.model.get === 'function' ? get(el.model, '_id') : undefined);
+
+    function belongsTo(model, articleId) {
+        return get(model, '_id') === articleId || model.getAncestorModels().some(ancestor => get(ancestor, '_id') === articleId);
+    }
+
+    function assessmentArticles(course) {
+        return course.getAllDescendantModels(true).filter(model => get(model, '_type') === 'article' && get(model, '_assessment')?._isEnabled);
+    }
+
+    function articleState(article) {
+        return {
+            id: get(article, '_id'),
+            title: String(get(article, 'title') || get(article, 'displayTitle') || '').replace(/\{\{[^}]*\}\}/g, '').trim(),
+            complete: !!get(article, '_isAssessmentComplete'),
+            pass: !!get(article, '_isPass'),
+            percent: Math.round(get(article, '_scoreAsPercent') || 0)
+        };
+    }
+
+    function currentArticle(articleId) {
+        const found = findCourse();
+        if (!found) return null;
+        const article = found.course.getAllDescendantModels(true).find(model => get(model, '_id') === articleId);
+        return article ? { article, doc: found.win.document, win: found.win } : null;
+    }
+
+    async function waitFor(check, timeoutMs, stepMs = 250) {
+        for (let waited = 0; waited < timeoutMs; waited += stepMs) {
+            const value = check();
+            if (value) return value;
+            await sleep(stepMs);
+        }
+        return check();
+    }
+
+    // The course router scrolls to an article given its id: #/courses/<course>/<module>/id/<article>
+    async function openArticle(articleId) {
+        const loaded = currentArticle(articleId);
+        if (!loaded) return null;
+        const { win } = loaded;
+        if (/\/id\//.test(win.location.hash)) win.location.hash = win.location.hash.replace(/\/id\/[^/?]+/, '/id/' + articleId);
+        const view = await waitFor(() => {
+            const current = currentArticle(articleId);
+            return current && findDeep(current.doc, el => modelId(el) === articleId && visible(el));
+        }, 12000);
+        if (view) {
+            view.scrollIntoView({ block: 'start' });
+            await sleep(400);
+        }
+        return view;
+    }
+
+    function clickVisible(doc, test) {
+        const el = allElements(doc).find(e => visible(e) && test(e));
+        if (el) el.click();
+        return !!el;
+    }
+
+    const aiRequests = new Map();
+    function askAi(questionId) {
+        return new Promise(resolve => {
+            const timer = setTimeout(() => { aiRequests.delete(questionId); resolve(false); }, 120000);
+            aiRequests.set(questionId, ok => { clearTimeout(timer); resolve(ok); });
+            window.postMessage({ channel: CHANNEL, event: 'need-ai', questionId }, window.location.origin);
+        });
+    }
+
+    // Options are labelled "<question id>-<index>-label" (inputs "-input").
+    async function answerFromData(doc, question) {
+        const id = get(question, '_id');
+        const items = get(question, '_items') || [];
+        if (!items.length || !items.every(item => typeof item._shouldBeSelected === 'boolean')) return false;
+        for (const [i, item] of items.entries()) {
+            const label = findDeep(doc, el => el.id === `${id}-${i}-label`);
+            if (!label) return false;
+            const input = label.getRootNode().querySelector(`[id="${id}-${i}-input"]`);
+            if (!!(input && input.checked) !== item._shouldBeSelected) {
+                label.click();
+                await sleep(60);
+            }
+        }
+        return true;
+    }
+
+    async function submitQuestion(doc, view) {
+        if (clickVisible(doc, el => el.matches('button.submit-button') && !el.disabled)) return true;
+        // Classic Adapt: a Submit button inside the question itself.
+        const inner = allElements(view.shadowRoot || view).find(el => visible(el) && el.matches('button') && /^\s*submit\s*$/i.test(el.textContent) && !el.disabled);
+        if (inner) inner.click();
+        return !!inner;
+    }
+
+    async function answerQuestions(articleId, log) {
+        const answered = new Set();
+        const openQuestion = doc => allElements(doc).find(el => el.model && typeof el.model.get === 'function' && get(el.model, '_isQuestionType') &&
+            visible(el) && !answered.has(get(el.model, '_id')) && !get(el.model, '_isSubmitted') && belongsTo(el.model, articleId));
+        const confirmShown = doc => findDeep(doc, el => el.id === 'confirm-exam' && visible(el)); // "Submit My Assessment"
+        for (let step = 0; step < 300; step++) {
+            const current = currentArticle(articleId);
+            if (!current) return;
+            const { doc } = current;
+            const view = openQuestion(doc);
+            if (!view) {
+                if (confirmShown(doc)) return;
+                // Between questions: wait for the next one or for the confirmation screen.
+                const next = await waitFor(() => {
+                    const again = currentArticle(articleId);
+                    return again && (openQuestion(again.doc) || confirmShown(again.doc));
+                }, 4000);
+                if (!next) return;
+                continue;
+            }
+            const question = view.model;
+            const id = get(question, '_id');
+            answered.add(id);
+            const fromData = await answerFromData(doc, question);
+            if (!fromData) {
+                log.ai = (log.ai || 0) + 1;
+                await askAi(id);
+            }
+            await sleep(150);
+            if (!await submitQuestion(doc, view)) return;
+            log.answered = (log.answered || 0) + 1;
+            await waitFor(() => !visible(view) || !view.isConnected || get(question, '_isSubmitted'), 3000);
+            await sleep(300);
+        }
+    }
+
+    async function confirmSubmission(articleId) {
+        const current = currentArticle(articleId);
+        if (!current) return false;
+        const box = findDeep(current.doc, el => el.id === 'confirm-exam' && visible(el));
+        if (!box) return false;
+        if (!box.checked) (box.labels && box.labels[0] || box).click();
+        await sleep(200);
+        if (!clickVisible(current.doc, el => el.matches('button.adaptive-assessment-submit'))) return false;
+        return !!await waitFor(() => {
+            const again = currentArticle(articleId);
+            return again && get(again.article, '_isAssessmentComplete');
+        }, 15000);
+    }
+
+    async function resetAssessment(articleId) {
+        const current = currentArticle(articleId);
+        if (!current) return false;
+        const clicked = clickVisible(current.doc, el => el.matches('button, [role="button"], .btn') &&
+            /^\s*(reset|retake|retry|try again|пройти снова|сбросить)\s*$/i.test(el.textContent) &&
+            el.getRootNode().host && belongsTo(el.getRootNode().host.model || current.article, articleId));
+        if (!clicked) return false;
+        // NetAcad reloads the page on reset: wait for a fresh, not completed assessment.
+        await sleep(1500);
+        return !!await waitFor(() => {
+            const again = currentArticle(articleId);
+            return again && !get(again.article, '_isAssessmentComplete');
+        }, 20000);
+    }
+
+    async function runAssessment(articleId, retakes, dryRun) {
+        const log = { attempts: 0 };
+        const allowed = 1 + Math.max(0, retakes);
+        for (;;) {
+            const current = currentArticle(articleId);
+            if (!current) return { ...log, error: 'not loaded' };
+            const state = articleState(current.article);
+            if (state.complete && state.pass) return { ...log, ...state };
+            if (dryRun || log.attempts >= allowed) return { ...log, ...state, dryRun };
+            if (!await openArticle(articleId)) return { ...log, ...state, error: 'not opened' };
+            if (state.complete && !await resetAssessment(articleId)) return { ...log, ...state, error: 'no reset' };
+            await openArticle(articleId);
+            const fresh = currentArticle(articleId);
+            clickVisible(fresh.doc, el => el.matches('.start-button') && belongsTo((el.getRootNode().host || {}).model || fresh.article, articleId));
+            await sleep(1200);
+            log.attempts++;
+            await answerQuestions(articleId, log);
+            if (!await confirmSubmission(articleId)) {
+                const after = currentArticle(articleId);
+                return { ...log, ...(after ? articleState(after.article) : state), error: 'not submitted' };
+            }
+            await sleep(800);
+        }
+    }
+
+    async function runQuizzes({ retakes = 0, dryRun = false } = {}) {
+        const found = findCourse();
+        if (!found) return { ready: false };
+        const results = [];
+        for (const article of assessmentArticles(found.course)) {
+            const id = get(article, '_id');
+            const result = await runAssessment(id, retakes, dryRun);
+            results.push(result);
+        }
+        return { ready: true, results };
+    }
+
     window.addEventListener('message', async event => {
         const data = event.data;
-        if (event.source !== window || !data || data.channel !== CHANNEL || !data.request) return;
+        if (event.source !== window || !data || data.channel !== CHANNEL) return;
+        if (data.aiDone && aiRequests.has(data.aiDone)) {
+            aiRequests.get(data.aiDone)(!!data.ok);
+            aiRequests.delete(data.aiDone);
+            return;
+        }
+        if (!data.request) return;
         let result;
         try {
-            result = data.request === 'complete' ? await completeModule() : status();
+            if (data.request === 'complete') result = await completeModule();
+            else if (data.request === 'quizzes') result = await runQuizzes(data.options || {});
+            else result = status();
         } catch (error) {
             result = { ready: false, error: error.message };
         }

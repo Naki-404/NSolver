@@ -230,3 +230,6 @@ select { text-overflow: ellipsis; }
     cursor: pointer;
 }
 .repo-link:hover { text-decoration: underline; text-decoration-color: var(--accent-2); }
+
+/* quiz autopilot: retake choice next to its label */
+.compact-select { width: 136px; flex: none; height: 30px; font-size: 12px; }
