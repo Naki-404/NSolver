@@ -26,6 +26,7 @@ async function injectIntoOpenTabs() {
     const netacadTabs = await chrome.tabs.query({ url: NETACAD_MATCHES });
     for (const tab of netacadTabs) {
         try {
+            await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['netacad-main.js'], world: 'MAIN' });
             await chrome.scripting.executeScript({ target: { tabId: tab.id, allFrames: true }, files: ['shared.js', 'model-provider.js', 'netacad.js'] });
         } catch (error) {
             console.warn('[Naki] Could not attach to tab', tab.id, error.message);

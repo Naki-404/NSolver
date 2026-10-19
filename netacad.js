@@ -15,6 +15,7 @@
     const state = { settings: Naki.withDefaults({}), solving: false, skipping: false };
     const tr = (key, vars) => Naki.t(state.settings.lang, key, vars);
     const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+    const normalize = s => String(s ?? '').toLowerCase().replace(/\s+/g, ' ').trim();
 
     // ------------------------------------------------------------------ deep DOM: Shadow DOM and same-origin frames
 
@@ -617,6 +618,73 @@
         }
     }
 
+    // ------------------------------------------------------------------ skipping the whole course
+    // netacad-main.js (page world) marks a loaded module complete through the course models in a few seconds;
+    // the player loads one module at a time, so every module is opened from the course outline in turn.
+
+    const MAIN_CHANNEL = 'naki-netacad-main';
+    let mainRequestId = 0;
+
+    function askMain(request, timeoutMs) {
+        return new Promise(resolve => {
+            const id = ++mainRequestId;
+            const timer = setTimeout(() => done(null), timeoutMs);
+            function done(result) {
+                clearTimeout(timer);
+                window.removeEventListener('message', onMessage);
+                resolve(result);
+            }
+            function onMessage(event) {
+                if (event.source === window && event.data?.channel === MAIN_CHANNEL && event.data.reply === id) done(event.data.result);
+            }
+            window.addEventListener('message', onMessage);
+            window.postMessage({ channel: MAIN_CHANNEL, request, id }, window.location.origin);
+        });
+    }
+
+    // Course outline of the player (netacad.com/launch): one "node-button-<id>" per module, but also per checkpoint
+    // exam, final exam, survey… Those must never be opened (that could start an exam attempt): modules only.
+    const MODULE_TITLE = /^\s*(module|модуль|módulo|modul|modulo)\s*\d+/i;
+    const NOT_A_MODULE = /exam|final|survey|assessment|экзамен|опрос/i;
+
+    function outlineModules() {
+        return [...document.querySelectorAll('button[id^="node-button-"]')]
+            .filter(button => MODULE_TITLE.test(button.textContent) && !NOT_A_MODULE.test(button.textContent))
+            .map(button => {
+                const percent = button.textContent.match(/(\d+)\s*%/);
+                return {
+                    id: button.id.slice('node-button-'.length),
+                    button,
+                    title: (button.textContent.match(/Module\s+\d+[^%]*?(?=\d+\s*%|$)/i)?.[0] || button.textContent).trim().slice(0, 60),
+                    percent: percent ? Number(percent[1]) : null
+                };
+            });
+    }
+
+    async function openModule(module) {
+        if (module.button.getAttribute('aria-expanded') !== 'true') {
+            module.button.click();
+            await sleep(500);
+        }
+        const first = document.querySelector(`[id="node-${module.id}"] button[id^="submodule-button-"]`) ||
+            document.getElementById('submodule-button-' + module.id);
+        if (!first) return null;
+        first.click();
+        for (let i = 0; i < 50; i++) {
+            await sleep(400);
+            const status = await askMain('status', 3000);
+            // Right after a switch the previous module may still be rendered: the course title must match too.
+            if (status?.ready && status.packageId === module.id && sameModuleTitle(status.title, module.title)) return status;
+        }
+        return null;
+    }
+
+    // "Module {{_globals._moduleNumber}}: Network Threats" (course model) vs "Module 2: Network Threats" (outline).
+    function sameModuleTitle(courseTitle, outlineTitle) {
+        const name = title => normalize(String(title).split(':').slice(1).join(':') || title);
+        return !name(courseTitle) || !name(outlineTitle) || name(outlineTitle).startsWith(name(courseTitle).slice(0, 20));
+    }
+
     async function skipMaterials() {
         if (state.skipping) {
             ui.show('info', tr('toastBusySkip'), { duration: 2500 });
@@ -624,66 +692,103 @@
         }
         state.skipping = true;
         try {
-            const roots = collectRoots();
-            // Bare ".component" wrappers, optional spacers and hidden components do not count for progress.
-            const components = roots.flatMap(root => [...root.querySelectorAll('.component')])
-                .filter(component => component.classList.length > 1 && !component.classList.contains('is-question') &&
-                    !component.classList.contains('is-optional') && component.getClientRects().length > 0);
-            const isMedia = component => component.classList.contains('media') || deepQueryAll(component, `video, ${PLAY_BUTTON}`).length > 0;
-            const media = components.filter(isMedia);
-            // Videos outside course components (plain pages) are finished on their own.
-            const videos = roots.flatMap(root => [...root.querySelectorAll('video')]).filter(video => !media.some(m => composedContains(m, video)));
-            const total = components.length + videos.length;
-            console.log('[Naki] NetAcad skip:', { components: components.length, media: media.length, videos: videos.length });
-            if (!total) {
-                ui.show('info', tr('netacadSkipNothing'), { duration: 8000 });
+            const current = await askMain('status', 3000);
+            if (!current?.ready) {
+                await skipCurrentPage(); // not an Adapt course page: go through what is on the screen
                 return;
             }
-            let done = 0;
-            const progress = () => ui.show('info', tr('netacadSkipping', { done, total }));
-            progress();
-
-            let videosDone = 0;
-            const restoreZoom = zoomOut(roots);
-            try {
-                for (const video of videos) {
-                    video.scrollIntoView({ block: 'center' });
-                    if (await finishVideo(video, null)) videosDone++;
-                    done++;
-                    progress();
-                }
-                for (const component of components) {
-                    if (!isComplete(component)) {
-                        await bringIntoView(component);
-                        if (media.includes(component)) {
-                            const video = await videoOf(component);
-                            if (video && await finishVideo(video, component)) videosDone++;
-                        } else if (deepQueryAll(component, 'play-pause').length) {
-                            await finishAnimation(component);
-                        } else {
-                            await openAllItems(component, roots);
-                        }
-                    } else if (media.includes(component)) {
-                        videosDone++;
-                    }
-                    done++;
-                    progress();
-                }
-            } finally {
-                restoreZoom();
+            const modules = outlineModules().filter(module => module.percent === null || module.percent < 100);
+            let modulesDone = 0, componentsDone = 0;
+            const failed = [];
+            if (!outlineModules().length) {
+                // A course frame without the player outline: this module only.
+                ui.show('info', tr('netacadSkipModule', { n: 1, total: 1, title: current.title }));
+                const result = await askMain('complete', 120000);
+                componentsDone += result?.done || 0;
+                modulesDone++;
             }
-            const complete = components.filter(component => component.classList.contains('is-complete')).length;
-            const summary = [
-                components.length ? `${tr('netacadSkipComponents')} ${complete}/${components.length}` : '',
-                media.length + videos.length ? `${tr('netacadSkipVideos')} ${videosDone}/${media.length + videos.length}` : ''
-            ].filter(Boolean).join(', ');
-            ui.show('success', tr('netacadSkipDone', { summary }), { duration: 12000 });
+            for (const [i, module] of modules.entries()) {
+                ui.show('info', tr('netacadSkipModule', { n: i + 1, total: modules.length, title: module.title }));
+                const status = await openModule(module);
+                if (!status) {
+                    failed.push(module.title);
+                    continue;
+                }
+                if (status.left) {
+                    const result = await askMain('complete', 120000);
+                    componentsDone += result?.done || 0;
+                    await sleep(1000); // let the player send its tracking statements before the next module loads
+                }
+                modulesDone++;
+            }
+            console.log('[Naki] NetAcad course skip:', { modulesDone, componentsDone, failed });
+            const message = tr('netacadSkipCourseDone', { modules: modulesDone, components: componentsDone }) +
+                (failed.length ? tr('netacadSkipFailed', { list: failed.join(', ') }) : '');
+            ui.show(failed.length && !modulesDone ? 'error' : 'success', message, { duration: 15000 });
         } catch (error) {
             console.error('[Naki] NetAcad skip error:', error);
             ui.show('error', tr('toastSkipError', { error: error.message }));
         } finally {
             state.skipping = false;
         }
+    }
+
+    // Fallback for pages without Adapt models: goes through the components on the screen like a person would.
+    async function skipCurrentPage() {
+        const roots = collectRoots();
+        // Bare ".component" wrappers, optional spacers and hidden components do not count for progress.
+        const components = roots.flatMap(root => [...root.querySelectorAll('.component')])
+            .filter(component => component.classList.length > 1 && !component.classList.contains('is-question') &&
+                !component.classList.contains('is-optional') && component.getClientRects().length > 0);
+        const isMedia = component => component.classList.contains('media') || deepQueryAll(component, `video, ${PLAY_BUTTON}`).length > 0;
+        const media = components.filter(isMedia);
+        // Videos outside course components (plain pages) are finished on their own.
+        const videos = roots.flatMap(root => [...root.querySelectorAll('video')]).filter(video => !media.some(m => composedContains(m, video)));
+        const total = components.length + videos.length;
+        console.log('[Naki] NetAcad skip:', { components: components.length, media: media.length, videos: videos.length });
+        if (!total) {
+            ui.show('info', tr('netacadSkipNothing'), { duration: 8000 });
+            return;
+        }
+        let done = 0;
+        const progress = () => ui.show('info', tr('netacadSkipping', { done, total }));
+        progress();
+
+        let videosDone = 0;
+        const restoreZoom = zoomOut(roots);
+        try {
+            for (const video of videos) {
+                video.scrollIntoView({ block: 'center' });
+                if (await finishVideo(video, null)) videosDone++;
+                done++;
+                progress();
+            }
+            for (const component of components) {
+                if (!isComplete(component)) {
+                    await bringIntoView(component);
+                    if (media.includes(component)) {
+                        const video = await videoOf(component);
+                        if (video && await finishVideo(video, component)) videosDone++;
+                    } else if (deepQueryAll(component, 'play-pause').length) {
+                        await finishAnimation(component);
+                    } else {
+                        await openAllItems(component, roots);
+                    }
+                } else if (media.includes(component)) {
+                    videosDone++;
+                }
+                done++;
+                progress();
+            }
+        } finally {
+            restoreZoom();
+        }
+        const complete = components.filter(component => component.classList.contains('is-complete')).length;
+        const summary = [
+            components.length ? `${tr('netacadSkipComponents')} ${complete}/${components.length}` : '',
+            media.length + videos.length ? `${tr('netacadSkipVideos')} ${videosDone}/${media.length + videos.length}` : ''
+        ].filter(Boolean).join(', ');
+        ui.show('success', tr('netacadSkipDone', { summary }), { duration: 12000 });
     }
 
     // ------------------------------------------------------------------ hotkeys

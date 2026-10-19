@@ -164,6 +164,7 @@
     // while the course was open, a course player opened in a way that bypassed injection. Opening this panel grants
     // activeTab, so the script can be injected from here; netacad.js ignores a second copy.
     async function injectNetacad(tab) {
+        await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['netacad-main.js'], world: 'MAIN' });
         await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: NETACAD_SCRIPT.js });
         await chrome.scripting.executeScript({ target: { tabId: tab.id, allFrames: true }, files: NETACAD_SCRIPT.js })
             .catch(error => console.warn('[Naki] NetAcad frames not injected:', error.message));
