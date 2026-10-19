@@ -503,7 +503,9 @@
     // in the panel. Coursera loads a new page per item, so the run lives in chrome.storage.local and resumes on load.
 
     const AUTOPILOT_KEY = 'nakiAutopilot';
-    const QUIZ_TYPES = ['exam', 'quiz'];
+    // "exam" / "quiz": older courses. "staffGraded" (Graded Assignment, module challenge, practice quiz) and
+    // "ungradedAssignment" (Test your knowledge): current Coursera quizzes at /assignment-submission/<id>/….
+    const QUIZ_TYPES = ['exam', 'quiz', 'staffGraded', 'ungradedAssignment'];
     const STEP_MS = 1500;
     const STUCK_MS = 45000; // a step that makes no progress for this long is given up, the run moves on
     const BUTTONS = {
@@ -546,8 +548,9 @@
             .find(el => isShown(el) && !el.disabled && el.getAttribute('aria-disabled') !== 'true' && pattern.test(buttonText(el)));
     }
 
-    const itemPath = (run, item) => `/learn/${run.slug}/${item.type}/${item.id}`;
-    const itemUrl = (run, item) => `https://www.coursera.org${itemPath(run, item)}/${item.slug || ''}`;
+    // /learn/<course>/item/<id> opens any item type on its own route; every route keeps the item id in the path.
+    const itemUrl = (run, item) => `https://www.coursera.org/learn/${run.slug}/item/${item.id}`;
+    const onItem = (run, item) => location.pathname.startsWith(`/learn/${run.slug}/`) && location.pathname.split('/').includes(item.id);
 
     // Quizzes in course order (modules → lessons → items); falls back to the API order.
     function courseQuizzes(materials) {
@@ -565,7 +568,9 @@
             }
         }
         return (ordered.length ? ordered : items)
-            .filter(item => QUIZ_TYPES.includes(item.contentSummary?.typeName) && !item.isLocked)
+            // Rubric-graded items are written work reviewed by people, not quizzes.
+            .filter(item => QUIZ_TYPES.includes(item.contentSummary?.typeName) && !item.isLocked &&
+                !(item.contentSummary?.definition?.assignmentFeatures || []).includes('ASSIGNMENT_RUBRICS'))
             .map(item => ({ id: item.id, slug: item.slug, type: item.contentSummary.typeName, name: item.name }));
     }
 
@@ -664,7 +669,7 @@
                 return;
             }
             showRun(run, tr('autopilotItem', { n: run.index + 1, total: run.items.length, title: item.name }));
-            if (!location.pathname.startsWith(itemPath(run, item))) {
+            if (!onItem(run, item)) {
                 if (run.phase !== 'navigating' || Date.now() - run.phaseAt > 20000) {
                     run.phase = 'navigating';
                     run.phaseAt = Date.now();
