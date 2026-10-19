@@ -1,10 +1,12 @@
-// Shared constants, settings and translations for background, content script and panel. NSolver, made by Naki — https://github.com/Naki-404/NSolver
+// Shared constants, settings and translations for background, content scripts and panel. NSolver, made by Naki — https://github.com/Naki-404/NSolver
 var Naki = (function () {
     const MSG = {
         SOLVE: 'naki:solve',
         SKIP: 'naki:skip',
         STATUS: 'naki:status',
-        API_REQUEST: 'naki:api-request'
+        API_REQUEST: 'naki:api-request',
+        CAPTURE: 'naki:capture-tab',
+        SOLVE_RELAY: 'naki:solve-relay'
     };
 
     const PROVIDER_IDS = ['octava', 'anthropic', 'openai', 'gemini'];
@@ -16,6 +18,7 @@ var Naki = (function () {
         models: { octava: 'gpt-6-luna', anthropic: 'claude-opus-5-5', openai: 'gpt-5.5', gemini: 'gemini-3.8-flash' },
         autoSolve: false,
         skipDiscussions: false,
+        netacadButton: true,
         hotkeys: {
             solve: { code: 'KeyK', key: 'K', alt: true, ctrl: false, shift: false, meta: false },
             skip: null
@@ -92,7 +95,7 @@ var Naki = (function () {
         ru: {
             tabMain: 'Главная', tabSettings: 'Настройки',
             statusChecking: 'Проверяю вкладку…',
-            statusNoCourse: 'Откройте курс на coursera.org/learn/…',
+            statusNoCourse: 'Откройте курс Coursera или Cisco NetAcad',
             statusSolving: 'Quiz Solver решает тест…',
             statusSkipping: 'Отмечаю материалы курса…',
             statusQuiz: 'Тест найден: {n} вопр.', statusOpenAttempt: ' (откройте попытку)',
@@ -111,8 +114,22 @@ var Naki = (function () {
             keyOk: 'Ключ сохранён и работает ({model}).', keyFail: 'Ключ сохранён, но проверка не прошла: {error}',
             keyFirst: 'Сначала сохраните API-ключ в «Настройках».',
             hotkeys: 'Горячие клавиши', hotkeyNone: 'Нет', hotkeyPress: 'Нажмите…', hotkeyReset: 'Сбросить',
-            hotkeysHint: 'Нажмите кнопку и сочетание клавиш — работает сразу на странице курса. Клавиша без Ctrl/Alt не срабатывает при вводе текста.',
+            hotkeysHint: 'Нажмите кнопку и сочетание клавиш — работает сразу на странице курса Coursera и на NetAcad. Клавиша без Ctrl/Alt не срабатывает при вводе текста.',
             language: 'Язык',
+            // Cisco NetAcad
+            statusNetacad: 'Cisco NetAcad: решение по скриншоту',
+            solveScreen: 'Решить вопрос на экране',
+            netacadButton: 'Кнопка на странице', netacadButtonHint: 'Плавающая кнопка «Решить» в углу NetAcad',
+            capturePermission: 'Скриншот без панели', capturePermissionHint: 'Нужно для кнопки и хоткея на странице',
+            grant: 'Разрешить', granted: 'Разрешено',
+            netacadSolve: 'Решить',
+            netacadCapturing: 'Делаю скриншот…',
+            netacadSolving: 'Решаю по скриншоту с помощью {model}…',
+            netacadAnswer: '{model} · {sec} с',
+            netacadNoQuestion: 'На экране не видно вопроса. Прокрутите к вопросу так, чтобы он и варианты были видны целиком, и повторите.',
+            netacadNeedPermission: 'Chrome не дал сделать скриншот. Нажмите «Решить» в панели NSolver или включите «Скриншот без панели» в карточке Cisco NetAcad.',
+            netacadError: 'Ошибка: {error}',
+            netacadCopy: 'Копировать', netacadCopied: 'Скопировано', netacadClose: 'Закрыть',
             // content script
             toastBusySolve: 'Quiz Solver уже работает…',
             toastNoKey: 'Нужен API-ключ: откройте панель расширения → Настройки.',
@@ -141,12 +158,13 @@ var Naki = (function () {
             errRefusal: 'Модель отказалась отвечать на запрос.',
             errJson: 'Модель вернула некорректный JSON: {error}',
             errNotArray: 'Ответ модели не является JSON-массивом решений.',
-            errEmptySolutions: 'модель вернула пустой список ответов.'
+            errEmptySolutions: 'модель вернула пустой список ответов.',
+            errImage: 'Не удалось получить скриншот вкладки.'
         },
         en: {
             tabMain: 'Main', tabSettings: 'Settings',
             statusChecking: 'Checking the tab…',
-            statusNoCourse: 'Open a course on coursera.org/learn/…',
+            statusNoCourse: 'Open a Coursera or Cisco NetAcad course',
             statusSolving: 'Quiz Solver is working…',
             statusSkipping: 'Marking course materials…',
             statusQuiz: 'Quiz found: {n} questions', statusOpenAttempt: ' (open the attempt)',
@@ -165,8 +183,21 @@ var Naki = (function () {
             keyOk: 'Key saved and working ({model}).', keyFail: 'Key saved, but the check failed: {error}',
             keyFirst: 'Save an API key in Settings first.',
             hotkeys: 'Hotkeys', hotkeyNone: 'None', hotkeyPress: 'Press keys…', hotkeyReset: 'Reset',
-            hotkeysHint: 'Click a button and press keys — works on the course page right away. A key without Ctrl/Alt is ignored while typing.',
+            hotkeysHint: 'Click a button and press keys — works right away on Coursera course pages and on NetAcad. A key without Ctrl/Alt is ignored while typing.',
             language: 'Language',
+            statusNetacad: 'Cisco NetAcad: solving from a screenshot',
+            solveScreen: 'Solve the question on screen',
+            netacadButton: 'On-page button', netacadButtonHint: 'Floating "Solve" button in the NetAcad corner',
+            capturePermission: 'Screenshot without panel', capturePermissionHint: 'Needed for the on-page button and hotkey',
+            grant: 'Allow', granted: 'Allowed',
+            netacadSolve: 'Solve',
+            netacadCapturing: 'Taking a screenshot…',
+            netacadSolving: 'Solving from the screenshot with {model}…',
+            netacadAnswer: '{model} · {sec}s',
+            netacadNoQuestion: 'No question is visible. Scroll so the question and all its options are fully on screen and try again.',
+            netacadNeedPermission: 'Chrome refused the screenshot. Press "Solve" in the NSolver panel or turn on "Screenshot without panel" in the Cisco NetAcad card.',
+            netacadError: 'Error: {error}',
+            netacadCopy: 'Copy', netacadCopied: 'Copied', netacadClose: 'Close',
             toastBusySolve: 'Quiz Solver is already running…',
             toastNoKey: 'An API key is required: open the extension panel → Settings.',
             toastNoQuestions: 'No quiz questions found. Open a quiz attempt (Start/Resume) and reload the page if needed.',
@@ -193,7 +224,8 @@ var Naki = (function () {
             errRefusal: 'The model declined to answer the request.',
             errJson: 'The model returned invalid JSON: {error}',
             errNotArray: 'The model response is not a JSON array of solutions.',
-            errEmptySolutions: 'the model returned an empty answer list.'
+            errEmptySolutions: 'the model returned an empty answer list.',
+            errImage: 'Could not capture the tab screenshot.'
         }
     };
 

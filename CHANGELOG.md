@@ -1,6 +1,13 @@
 # Changelog
 
-Все заметные изменения NSolver: Coursera Solver / AutoPass.
+Все заметные изменения NSolver: Coursera & NetAcad Solver / AutoPass.
+
+## 2.4.0
+- **Cisco NetAcad.** На netacad.com NSolver делает скриншот видимой части вкладки, отправляет его выбранной модели и показывает правильные варианты в карточке на странице. Режим основан на идее [Cisco Netacad Auto-Solver](https://github.com/sanaysarthak/cisco-netacad-autosolver) (Sarthak Sanay, BSD-3-Clause).
+- Запуск на NetAcad: плавающая кнопка **Решить**, `Alt+K` (в том числе внутри фреймов курса) или кнопка в окне расширения.
+- Скриншоты понимают все четыре API: OctavAPI, Claude API, ChatGPT API, Gemini API. Ключ берётся из настроек, а не из кода.
+- Окно расширения на NetAcad показывает карточку Cisco NetAcad: переключатель кнопки на странице и необязательное разрешение «Скриншот без панели».
+- Новое название: **NSolver: Coursera & NetAcad Solver / AutoPass**.
 
 ## 2.3.0
 - Новое название: **NSolver: Coursera Solver / AutoPass**.
