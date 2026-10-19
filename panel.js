@@ -49,7 +49,8 @@
             <section class="card" id="skipCard">
                 <div class="card-title"><h2 data-i18n="skipTitle"></h2></div>
                 <button class="btn secondary" id="skip" type="button">${ICONS.skip}<span class="btn-label" data-i18n="skip"></span><kbd id="skipKbd" hidden></kbd></button>
-                <div class="row">
+                <p class="hint" id="netacadSkipHint" data-i18n="netacadSkipHint" hidden></p>
+                <div class="row" id="skipDiscussionsRow">
                     <label class="label-text" for="skipDiscussions"><span data-i18n="skipDiscussions"></span><small data-i18n="skipDiscussionsHint"></small></label>
                     <label class="switch"><input type="checkbox" id="skipDiscussions"><span class="track"></span></label>
                 </div>
@@ -60,10 +61,6 @@
                 <div class="row">
                     <label class="label-text" for="netacadButton"><span data-i18n="netacadButton"></span><small data-i18n="netacadButtonHint"></small></label>
                     <label class="switch"><input type="checkbox" id="netacadButton"><span class="track"></span></label>
-                </div>
-                <div class="row">
-                    <div class="label-text"><span data-i18n="capturePermission"></span><small data-i18n="capturePermissionHint"></small></div>
-                    <button class="btn small secondary" id="grantCapture" type="button"><span data-i18n="grant"></span></button>
                 </div>
             </section>
         </div>
@@ -199,12 +196,9 @@
     function showSite(site) {
         const netacad = site === 'netacad';
         $('autoSolveRow').hidden = netacad;
-        $('skipCard').hidden = netacad;
+        $('skipDiscussionsRow').hidden = netacad;
+        $('netacadSkipHint').hidden = !netacad;
         $('netacadCard').hidden = !netacad;
-        const label = $('solve').querySelector('.btn-label');
-        label.dataset.i18n = netacad ? 'solveScreen' : 'solve';
-        if (!$('solve').disabled) label.textContent = tr(label.dataset.i18n);
-        if (netacad) renderCapturePermission();
     }
 
     async function refreshStatus() {
@@ -212,7 +206,8 @@
             const result = await sendToTab({ type: Naki.MSG.STATUS });
             if (!result?.ok) throw new Error('no status');
             showSite(result.site);
-            if (result.site === 'netacad') setStatus(result.solving ? 'busy' : 'ready', result.solving ? 'statusSolving' : 'statusNetacad');
+            if (result.solving) setStatus('busy', 'statusSolving');
+            else if (result.site === 'netacad') setStatus(result.skipping ? 'busy' : 'ready', result.skipping ? 'statusSkipping' : 'statusNetacad');
             else if (result.solving) setStatus('busy', 'statusSolving');
             else if (result.skipping) setStatus('busy', 'statusSkipping');
             else if (result.questions) setStatus('ready', 'statusQuiz', { n: result.questions }, result.onAttempt ? null : 'statusOpenAttempt');
@@ -378,26 +373,6 @@
 
     $('skipDiscussions').addEventListener('change', () => Naki.saveSettings({ skipDiscussions: $('skipDiscussions').checked }));
     $('netacadButton').addEventListener('change', () => Naki.saveSettings({ netacadButton: $('netacadButton').checked }));
-
-    // ------------------------------------------------------------------ NetAcad screenshot permission
-    // Opening this panel grants activeTab, so its solve button always works; the on-page button and hotkey need <all_urls>.
-
-    const CAPTURE_PERMISSION = { origins: ['<all_urls>'] };
-
-    async function renderCapturePermission() {
-        const granted = await chrome.permissions.contains(CAPTURE_PERMISSION).catch(() => false);
-        const button = $('grantCapture');
-        const label = button.querySelector('span');
-        button.disabled = granted;
-        label.dataset.i18n = granted ? 'granted' : 'grant';
-        label.textContent = tr(label.dataset.i18n);
-    }
-
-    $('grantCapture').addEventListener('click', async () => {
-        // The popup may close while Chrome shows the prompt; the grant still applies.
-        await chrome.permissions.request(CAPTURE_PERMISSION).catch(error => console.warn('[Naki] Permission request failed:', error));
-        renderCapturePermission();
-    });
 
     let keyVisible = false;
     $('toggleKey').addEventListener('click', () => {

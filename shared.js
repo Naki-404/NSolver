@@ -5,8 +5,7 @@ var Naki = (function () {
         SKIP: 'naki:skip',
         STATUS: 'naki:status',
         API_REQUEST: 'naki:api-request',
-        CAPTURE: 'naki:capture-tab',
-        SOLVE_RELAY: 'naki:solve-relay'
+        RELAY: 'naki:relay'
     };
 
     const PROVIDER_IDS = ['octava', 'anthropic', 'openai', 'gemini'];
@@ -117,20 +116,17 @@ var Naki = (function () {
             hotkeysHint: 'Нажмите кнопку и сочетание клавиш — работает сразу на странице курса Coursera и на NetAcad. Клавиша без Ctrl/Alt не срабатывает при вводе текста.',
             language: 'Язык',
             // Cisco NetAcad
-            statusNetacad: 'Cisco NetAcad: решение по скриншоту',
+            statusNetacad: 'Cisco NetAcad: курс открыт',
             statusNetacadNoAccess: 'NetAcad: Chrome не пускает расширение на страницу. Обновите вкладку.',
-            solveScreen: 'Решить вопрос на экране',
             netacadButton: 'Кнопка на странице', netacadButtonHint: 'Плавающая кнопка «Решить» в углу NetAcad',
-            capturePermission: 'Скриншот без панели', capturePermissionHint: 'Нужно для кнопки и хоткея на странице',
-            grant: 'Разрешить', granted: 'Разрешено',
-            netacadSolve: 'Решить',
-            netacadCapturing: 'Делаю скриншот…',
-            netacadSolving: 'Решаю по скриншоту с помощью {model}…',
-            netacadAnswer: '{model} · {sec} с',
-            netacadNoQuestion: 'На экране не видно вопроса. Прокрутите к вопросу так, чтобы он и варианты были видны целиком, и повторите.',
-            netacadNeedPermission: 'Chrome не дал сделать скриншот. Нажмите «Решить» в панели NSolver или включите «Скриншот без панели» в карточке Cisco NetAcad.',
-            netacadError: 'Ошибка: {error}',
-            netacadCopy: 'Копировать', netacadCopied: 'Скопировано', netacadClose: 'Закрыть',
+            netacadSolve: 'Решить', netacadClose: 'Закрыть',
+            netacadNoQuestions: 'На странице нет неотвеченных вопросов. Откройте тест (или страницу с вопросами) и повторите.',
+            netacadPartial: 'Проставлено {applied} из {total} за {sec} с. Отметьте вручную:',
+            netacadSkipHint: 'Видео, текст, вкладки и аккордеоны текущего модуля',
+            netacadSkipping: 'Прохожу материалы: {done} из {total}…',
+            netacadSkipDone: 'Готово: {summary}. Обновите страницу курса, чтобы увидеть прогресс.',
+            netacadSkipNothing: 'Материалы курса не найдены. Откройте модуль курса и повторите.',
+            netacadSkipComponents: 'компоненты', netacadSkipVideos: 'видео',
             // content script
             toastBusySolve: 'Quiz Solver уже работает…',
             toastNoKey: 'Нужен API-ключ: откройте панель расширения → Настройки.',
@@ -159,8 +155,7 @@ var Naki = (function () {
             errRefusal: 'Модель отказалась отвечать на запрос.',
             errJson: 'Модель вернула некорректный JSON: {error}',
             errNotArray: 'Ответ модели не является JSON-массивом решений.',
-            errEmptySolutions: 'модель вернула пустой список ответов.',
-            errImage: 'Не удалось получить скриншот вкладки.'
+            errEmptySolutions: 'модель вернула пустой список ответов.'
         },
         en: {
             tabMain: 'Main', tabSettings: 'Settings',
@@ -186,20 +181,17 @@ var Naki = (function () {
             hotkeys: 'Hotkeys', hotkeyNone: 'None', hotkeyPress: 'Press keys…', hotkeyReset: 'Reset',
             hotkeysHint: 'Click a button and press keys — works right away on Coursera course pages and on NetAcad. A key without Ctrl/Alt is ignored while typing.',
             language: 'Language',
-            statusNetacad: 'Cisco NetAcad: solving from a screenshot',
+            statusNetacad: 'Cisco NetAcad: course open',
             statusNetacadNoAccess: 'NetAcad: Chrome blocks the extension on this page. Reload the tab.',
-            solveScreen: 'Solve the question on screen',
             netacadButton: 'On-page button', netacadButtonHint: 'Floating "Solve" button in the NetAcad corner',
-            capturePermission: 'Screenshot without panel', capturePermissionHint: 'Needed for the on-page button and hotkey',
-            grant: 'Allow', granted: 'Allowed',
-            netacadSolve: 'Solve',
-            netacadCapturing: 'Taking a screenshot…',
-            netacadSolving: 'Solving from the screenshot with {model}…',
-            netacadAnswer: '{model} · {sec}s',
-            netacadNoQuestion: 'No question is visible. Scroll so the question and all its options are fully on screen and try again.',
-            netacadNeedPermission: 'Chrome refused the screenshot. Press "Solve" in the NSolver panel or turn on "Screenshot without panel" in the Cisco NetAcad card.',
-            netacadError: 'Error: {error}',
-            netacadCopy: 'Copy', netacadCopied: 'Copied', netacadClose: 'Close',
+            netacadSolve: 'Solve', netacadClose: 'Close',
+            netacadNoQuestions: 'No unanswered questions on the page. Open the quiz (or a page with questions) and try again.',
+            netacadPartial: 'Filled {applied} of {total} in {sec}s. Select these yourself:',
+            netacadSkipHint: 'Videos, text, tabs and accordions of the current module',
+            netacadSkipping: 'Going through materials: {done} of {total}…',
+            netacadSkipDone: 'Done: {summary}. Reload the course page to see progress.',
+            netacadSkipNothing: 'No course materials found. Open a course module and try again.',
+            netacadSkipComponents: 'components', netacadSkipVideos: 'videos',
             toastBusySolve: 'Quiz Solver is already running…',
             toastNoKey: 'An API key is required: open the extension panel → Settings.',
             toastNoQuestions: 'No quiz questions found. Open a quiz attempt (Start/Resume) and reload the page if needed.',
@@ -226,8 +218,7 @@ var Naki = (function () {
             errRefusal: 'The model declined to answer the request.',
             errJson: 'The model returned invalid JSON: {error}',
             errNotArray: 'The model response is not a JSON array of solutions.',
-            errEmptySolutions: 'the model returned an empty answer list.',
-            errImage: 'Could not capture the tab screenshot.'
+            errEmptySolutions: 'the model returned an empty answer list.'
         }
     };
 

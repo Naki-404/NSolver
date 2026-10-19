@@ -1,4 +1,4 @@
-// Service worker: AI API proxy, NetAcad screenshots and script injection into already-open Coursera / NetAcad tabs. NSolver, made by Naki — https://github.com/Naki-404/NSolver
+// Service worker: AI API proxy, NetAcad hotkey relay and script injection into already-open Coursera / NetAcad tabs. NSolver, made by Naki — https://github.com/Naki-404/NSolver
 importScripts('shared.js');
 
 const API_TIMEOUT_MS = 120000;
@@ -70,49 +70,14 @@ async function apiRequest(message) {
     }
 }
 
-// ---- Cisco NetAcad: screenshot of the visible tab for the vision prompt.
-// Chrome allows it with activeTab (granted when the NSolver panel is opened) or the optional <all_urls> permission.
-const CAPTURE_MAX_EDGE = 1920; // HiDPI screens give 3–4K screenshots; larger images only cost tokens
-
-function bufferToBase64(buffer) {
-    const bytes = new Uint8Array(buffer);
-    let binary = '';
-    for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
-    return btoa(binary);
-}
-
-async function downscale(dataUrl) {
-    const bitmap = await createImageBitmap(await (await fetch(dataUrl)).blob());
-    const scale = CAPTURE_MAX_EDGE / Math.max(bitmap.width, bitmap.height);
-    if (scale >= 1) return dataUrl;
-    const canvas = new OffscreenCanvas(Math.round(bitmap.width * scale), Math.round(bitmap.height * scale));
-    canvas.getContext('2d').drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-    const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.85 });
-    return 'data:image/jpeg;base64,' + bufferToBase64(await blob.arrayBuffer());
-}
-
-async function captureTab(sender) {
-    if (!sender.tab || !sender.tab.active) return { error: 'the tab is not active' };
-    try {
-        const dataUrl = await chrome.tabs.captureVisibleTab(sender.tab.windowId, { format: 'jpeg', quality: 85 });
-        return { dataUrl: await downscale(dataUrl).catch(() => dataUrl) };
-    } catch (error) {
-        const message = error.message || String(error);
-        return { error: message, needsPermission: /all_urls|activeTab|permission/i.test(message) };
-    }
-}
-
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message?.type === Naki.MSG.API_REQUEST) {
         apiRequest(message).then(sendResponse);
         return true;
     }
-    if (message?.type === Naki.MSG.CAPTURE) {
-        captureTab(sender).then(sendResponse);
-        return true;
-    }
-    // A hotkey pressed inside a NetAcad iframe: the top frame owns the UI and does the work.
-    if (message?.type === Naki.MSG.SOLVE_RELAY && sender.tab) {
-        chrome.tabs.sendMessage(sender.tab.id, { type: Naki.MSG.SOLVE }, { frameId: 0 }).catch(() => { });
+    // A hotkey pressed inside a NetAcad course frame: the top frame owns the UI and does the work.
+    const relayed = [Naki.MSG.SOLVE, Naki.MSG.SKIP];
+    if (message?.type === Naki.MSG.RELAY && sender.tab && relayed.includes(message.action)) {
+        chrome.tabs.sendMessage(sender.tab.id, { type: message.action }, { frameId: 0 }).catch(() => { });
     }
 });

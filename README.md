@@ -6,7 +6,7 @@
 
 Расширение для Chrome, которое решает тесты Coursera и Cisco NetAcad с помощью ИИ и отмечает лекции и материалы Coursera пройденными.
 
-**made by [Naki](https://github.com/Naki-404/NSolver)** · Manifest V3 · v2.4.1 · [English](#english)
+**made by [Naki](https://github.com/Naki-404/NSolver)** · Manifest V3 · v2.5.0 · [English](#english)
 
 </div>
 
@@ -22,8 +22,8 @@
 
 - **Quiz Solver.** Берёт вопросы открытой попытки теста, отправляет их выбранной модели и сам отмечает ответы: одиночный выбор, несколько вариантов (checkbox) и текстовые поля.
 - **Авто-решение.** Тест решается сразу при открытии попытки, без нажатий.
-- **Cisco NetAcad.** На netacad.com NSolver делает скриншот видимой части вкладки, отправляет его выбранной модели и показывает правильные варианты в карточке справа внизу. Запуск: плавающая кнопка **Решить**, `Alt+K` или кнопка в окне расширения.
-- **Пропуск материалов.** Отмечает лекции и материалы для чтения пройденными. По желанию отвечает в обсуждениях курса.
+- **Cisco NetAcad.** NSolver читает текст вопросов прямо со страницы курса (включая фреймы и Shadow DOM), отправляет модели только текст и сам отмечает ответы: один или несколько вариантов, выпадающие списки, текстовые поля. Запуск: плавающая кнопка **Решить**, `Alt+K` или кнопка в окне расширения.
+- **Пропуск материалов.** Coursera: отмечает лекции и материалы для чтения пройденными, по желанию отвечает в обсуждениях. NetAcad: досматривает видео, прокручивает текст и открывает все вкладки и аккордеоны текущего модуля.
 - **Четыре API на выбор:** OctavAPI, Claude API, ChatGPT API и Gemini API. Для каждого хранится свой ключ и своя модель.
 - **Актуальный список моделей.** После сохранения ключа подтягивается полный список моделей прямо из API.
 - **Горячие клавиши.** Назначаются прямо в расширении и сразу работают на странице курса. По умолчанию Quiz Solver запускается по `Alt+K`.
@@ -56,11 +56,12 @@
 
 ### Cisco NetAcad
 
-1. Откройте вопрос на netacad.com так, чтобы он и все варианты ответа были видны на экране.
-2. Нажмите иконку NSolver → **Решить вопрос на экране**. Можно и плавающей кнопкой **Решить** или `Alt+K`, но для них один раз включите **Скриншот без панели** в карточке Cisco NetAcad (Chrome спросит разрешение).
-3. Отметьте варианты из карточки сами: на NetAcad NSolver ответы не проставляет.
+1. Откройте тест или страницу модуля с вопросами на netacad.com.
+2. Нажмите плавающую кнопку **Решить**, `Alt+K` или **Решить тест** в окне расширения.
+3. NSolver отметит ответы на всех неотвеченных вопросах страницы и подсветит их зелёной рамкой. Если какой-то вопрос отметить не удалось, его ответ будет в карточке справа внизу.
+4. **Проверьте ответы и нажмите Submit сами.**
 
-Для NetAcad нужна модель, которая понимает изображения. Модели по умолчанию у всех четырёх API подходят.
+**Пропустить материалы** (в окне расширения или назначенный хоткей) проходит текущий модуль: видео, текст, вкладки, аккордеоны.
 
 ## Провайдеры
 
@@ -89,8 +90,7 @@
 - **«Неверный или неактивный API-ключ».** Проверьте ключ и баланс у провайдера.
 - **Часть ответов не проставилась.** В уведомлении будут номера вопросов: проверьте их вручную.
 - **NetAcad не распознаётся (кнопки «Решить» нет, статус «Откройте курс…»).** После обновления файлов перезагрузите расширение кнопкой ↻ на `chrome://extensions` (Opera / Opera GX: `opera://extensions`) и обновите вкладку NetAcad. Внизу окна NSolver должна быть новая версия.
-- **NetAcad: «Chrome не дал сделать скриншот».** Нажмите **Решить вопрос на экране** в окне расширения или включите **Скриншот без панели** в карточке Cisco NetAcad.
-- **NetAcad: «На экране не видно вопроса».** Прокрутите страницу так, чтобы вопрос и варианты были видны целиком.
+- **NetAcad: «На странице нет неотвеченных вопросов».** Откройте сам тест (страницу с вариантами ответов). Уже отправленные вопросы NSolver не трогает.
 
 Больше решений: [docs/USAGE.md#частые-проблемы](docs/USAGE.md#частые-проблемы).
 
@@ -98,7 +98,6 @@
 
 - API-ключи хранятся только в вашем браузере (`chrome.storage.local`).
 - Текст вопросов отправляется только выбранному вами API. Других серверов у расширения нет.
-- На NetAcad тому же API отправляется скриншот видимой части вкладки, и только по вашему нажатию. Разрешение «Скриншот без панели» (`<all_urls>`) необязательное: Chrome требует его, чтобы снимать экран кнопкой на странице. Без него скриншот делается только из окна расширения.
 - Запросы к Coursera идут от вашей сессии на coursera.org, как обычные действия на сайте.
 
 ## Важно
@@ -106,17 +105,16 @@
 - Ответы ИИ могут быть неверными. Проверяйте их перед отправкой.
 - Автоматическое прохождение оцениваемых заданий может нарушать [Honor Code Coursera](https://www.coursera.org/about/terms/honorcode). За использование расширения отвечаете вы сами.
 - Новые курсы могут блокировать автоматическую отметку материалов.
-- Решение NetAcad основано на идее [Cisco Netacad Auto-Solver](https://github.com/sanaysarthak/cisco-netacad-autosolver) (Sarthak Sanay), лицензия BSD-3-Clause.
 
 ## Структура проекта
 
 ```
 NSolver/
 ├── manifest.json        # описание расширения (Manifest V3)
-├── background.js        # прокси к AI API, скриншоты NetAcad, подключение к открытым вкладкам
+├── background.js        # прокси к AI API, хоткеи из фреймов NetAcad, подключение к открытым вкладкам
 ├── interceptor.js       # перехват ответов Coursera на странице (MAIN world)
 ├── content.js           # Coursera: Quiz Solver, пропуск материалов, хоткеи, уведомления
-├── netacad.js           # Cisco NetAcad: решение по скриншоту, кнопка на странице, хоткей
+├── netacad.js           # Cisco NetAcad: вопросы из DOM, автоответы, пропуск материалов, кнопка, хоткеи
 ├── model-provider.js    # запросы к OctavAPI / Claude / ChatGPT / Gemini
 ├── shared.js            # настройки, хоткеи, переводы RU/EN
 ├── popup.html           # окно расширения
@@ -135,13 +133,11 @@ NSolver/
 
 <p align="center"><img src="docs/screenshots/popup-en-main.png" width="300" alt="Main tab"></p>
 
-**Features:** quiz solver for single choice, multiple choice and text answers; auto-solve when an attempt opens; Cisco NetAcad mode that sends a screenshot of the visible question to the model and shows the correct options on the page (floating **Solve** button, `Alt+K` or the popup button); skip lectures and readings (optionally reply in discussions); four providers (OctavAPI, Claude API, ChatGPT API, Gemini API) with a live model list from the API; in-extension hotkeys (`Alt+K` by default); RU / EN interface.
+**Features:** quiz solver for single choice, multiple choice and text answers; auto-solve when an attempt opens; Cisco NetAcad mode that reads the questions as text from the course page and selects the answers itself (floating **Solve** button, `Alt+K` or the popup button); skip materials (Coursera: lectures and readings, optionally discussions; NetAcad: videos, text, tabs and accordions of the current module); four providers (OctavAPI, Claude API, ChatGPT API, Gemini API) with a live model list from the API; in-extension hotkeys (`Alt+K` by default); RU / EN interface.
 
 **Install:** download the ZIP or `git clone`, open `chrome://extensions`, turn on Developer mode, click **Load unpacked** and select the `NSolver` folder.
 
-**Use:** Settings → choose an API, paste a key, **Save**, pick a model. Open a Coursera quiz attempt and press `Alt+K` or **Solve quiz**. Review the answers and submit yourself. On NetAcad, make the question visible and press **Solve the question on screen** in the popup; to use the on-page button and hotkey, turn on **Screenshot without panel** once.
-
-**Privacy:** keys stay in `chrome.storage.local`; questions (and, on NetAcad, a screenshot of the visible tab, taken only when you ask) go only to the API you selected.
+**Use:** Settings → choose an API, paste a key, **Save**, pick a model. Open a Coursera quiz attempt and press `Alt+K` or **Solve quiz**. Review the answers and submit yourself. On NetAcad, open the quiz and press the floating **Solve** button or `Alt+K`.storage.local`; only the question text goes to the API you selected.
 
 **Note:** AI answers can be wrong. Automated completion of graded work may violate the Coursera Honor Code. Use at your own risk.
 

@@ -46,7 +46,7 @@ var ModelProvider = (function () {
             }
             return item;
         });
-        return `You are an expert tutor answering a Coursera quiz. Read every question carefully and determine the correct answer(s).
+        return `You are an expert tutor answering an online course quiz (Coursera or Cisco Networking Academy). Read every question carefully and determine the correct answer(s).
 
 Rules:
 1. For "mcq" questions:
@@ -61,24 +61,6 @@ Rules:
 
 Questions:
 ${JSON.stringify(data, null, 2)}`;
-    }
-
-    // Cisco NetAcad: the question is read from a screenshot of the visible tab.
-    // Prompt idea from Cisco Netacad Auto-Solver by Sarthak Sanay (BSD-3-Clause).
-    const NO_QUESTION = 'NO_QUESTION';
-
-    function buildScreenshotPrompt() {
-        return `You are an expert in Cisco Networking Academy courses (CCNA, IT Essentials, Networking Basics, Cybersecurity, Python, Linux and others).
-The image is a screenshot of a Cisco NetAcad page with a quiz or exam question.
-
-Determine all correct answers to the question(s) visible on the screen.
-- If the question says "Choose two", "Choose three" etc., give exactly that many options.
-- Copy each correct option exactly as written on the screen, one per line.
-- Matching / drag-and-drop: one line per pair, formatted "left item → right item".
-- Fill-in-the-blank or command questions: write only the value or command.
-- If several questions are visible, start each question's answers with a line "Q1:", "Q2:" and so on, in screen order.
-- No explanations, no markdown, no numbering of options.
-- If no question is visible, reply exactly: ${NO_QUESTION}`;
     }
 
     function buildCorrectionPrompt(questions, problems) {
@@ -249,20 +231,7 @@ Return the corrected JSON array only.`;
 
     // ---------------------------------------------------------------- providers
 
-    // ---------------------------------------------------------------- images
-    // image: { mimeType, data (base64), dataUrl } or undefined for text-only prompts.
-
-    function chatContent(prompt, image) {
-        if (!image) return prompt;
-        return [{ type: 'text', text: prompt }, { type: 'image_url', image_url: { url: image.dataUrl } }];
-    }
-
-    function responsesInput(prompt, image) {
-        if (!image) return prompt;
-        return [{ role: 'user', content: [{ type: 'input_text', text: prompt }, { type: 'input_image', image_url: image.dataUrl }] }];
-    }
-
-    async function octavaRequest(ctx, prompt, image) {
+    async function octavaRequest(ctx, prompt) {
         const headers = { Authorization: 'Bearer ' + ctx.apiKey };
         const parse = ({ json, text, status }) => {
             if (json) {
@@ -281,7 +250,7 @@ Return the corrected JSON array only.`;
             return parse(await call(ctx, {
                 url: 'https://octavapi.shop/v1/chat/completions',
                 headers,
-                body: { model: ctx.model, messages: [{ role: 'user', content: chatContent(prompt, image) }] }
+                body: { model: ctx.model, messages: [{ role: 'user', content: prompt }] }
             }));
         } catch (chatError) {
             // GPT routes on Octava are listed with the Responses protocol; try it on server-side errors.
@@ -291,7 +260,7 @@ Return the corrected JSON array only.`;
                 return parse(await call(ctx, {
                     url: 'https://octavapi.shop/v1/responses',
                     headers,
-                    body: { model: ctx.model, input: responsesInput(prompt, image), stream: true }
+                    body: { model: ctx.model, input: prompt, stream: true }
                 }));
             } catch (responsesError) {
                 const combined = apiError(`${chatError.message} | /v1/responses: ${responsesError.message}`);
@@ -301,16 +270,13 @@ Return the corrected JSON array only.`;
         }
     }
 
-    async function anthropicRequest(ctx, prompt, image) {
+    async function anthropicRequest(ctx, prompt) {
         const headers = {
             'x-api-key': ctx.apiKey,
             'anthropic-version': '2023-06-01',
             'anthropic-dangerous-direct-browser-access': 'true'
         };
-        const content = image
-            ? [{ type: 'image', source: { type: 'base64', media_type: image.mimeType, data: image.data } }, { type: 'text', text: prompt }]
-            : prompt;
-        const body = { model: ctx.model, max_tokens: MAX_OUTPUT_TOKENS, messages: [{ role: 'user', content }] };
+        const body = { model: ctx.model, max_tokens: MAX_OUTPUT_TOKENS, messages: [{ role: 'user', content: prompt }] };
         if (CLAUDE_FALLBACK_MODELS.test(ctx.model)) {
             // Server-side fallback: if the model declines, Anthropic retries on a suitable model.
             headers['anthropic-beta'] = 'server-side-fallback-2026-07-01';
@@ -323,11 +289,11 @@ Return the corrected JSON array only.`;
         return textOrThrow(ctx, extractTextFromResponse(json));
     }
 
-    async function openaiRequest(ctx, prompt, image) {
+    async function openaiRequest(ctx, prompt) {
         const { json, status } = await call(ctx, {
             url: 'https://api.openai.com/v1/chat/completions',
             headers: { Authorization: 'Bearer ' + ctx.apiKey },
-            body: { model: ctx.model, messages: [{ role: 'user', content: chatContent(prompt, image) }] }
+            body: { model: ctx.model, messages: [{ role: 'user', content: prompt }] }
         });
         const error = jsonErrorOrNull(ctx, json, status);
         if (error) throw error;
@@ -335,12 +301,12 @@ Return the corrected JSON array only.`;
         return textOrThrow(ctx, extractTextFromResponse(json));
     }
 
-    async function geminiRequest(ctx, prompt, image) {
+    async function geminiRequest(ctx, prompt) {
         const model = ctx.model.replace(/^models\//, '');
         const { json, status } = await call(ctx, {
             url: `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
             headers: { 'x-goog-api-key': ctx.apiKey },
-            body: { contents: [{ role: 'user', parts: image ? [{ text: prompt }, { inlineData: { mimeType: image.mimeType, data: image.data } }] : [{ text: prompt }] }] }
+            body: { contents: [{ role: 'user', parts: [{ text: prompt }] }] }
         });
         const error = jsonErrorOrNull(ctx, json, status);
         if (error) throw error;
@@ -360,7 +326,7 @@ Return the corrected JSON array only.`;
         const ctx = makeContext(options);
         for (let attempt = 0; ; attempt++) {
             try {
-                const text = await REQUESTERS[ctx.provider](ctx, options.prompt, options.image);
+                const text = await REQUESTERS[ctx.provider](ctx, options.prompt);
                 return { text, modelId: ctx.model, provider: ctx.provider };
             } catch (error) {
                 if (!error.retryable || attempt >= RETRY_DELAYS_MS.length) throw error;
@@ -512,22 +478,6 @@ Return the corrected JSON array only.`;
             chunkSolutions.map(solution => solution && { ...solution, index: chunkIndex * CHUNK_SIZE + solution.index }));
     }
 
-    // options: { provider, apiKey, modelId, lang, imageDataUrl } -> { answer: string | null, modelId }
-    // answer is null when the model sees no question on the screenshot.
-    async function solveScreenshot(options) {
-        makeContext(options);
-        const match = /^data:(image\/[\w.+-]+);base64,(.+)$/.exec(options.imageDataUrl || '');
-        if (!match) throw new Error(Naki.t(options.lang, 'errImage'));
-        const image = { mimeType: match[1], data: match[2], dataUrl: options.imageDataUrl };
-        const { text, modelId } = await generateContent({ ...options, prompt: buildScreenshotPrompt(), image });
-
-        let answer = String(text).replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
-        const fenced = answer.match(/^```\w*\s*([\s\S]*?)\s*```$/);
-        if (fenced) answer = fenced[1].trim();
-        answer = answer.split(/\r?\n/).map(line => line.trim()).filter(Boolean).join('\n');
-        return { answer: answer && answer !== NO_QUESTION ? answer : null, modelId };
-    }
-
     async function testApiKey(options) {
         const result = await generateContent({ ...options, prompt: 'Respond strictly with the single word: "READY"' });
         return { success: true, modelId: result.modelId, output: result.text.trim() };
@@ -543,7 +493,6 @@ Return the corrected JSON array only.`;
         generateContent,
         listModels,
         solveQuizQuestions,
-        solveScreenshot,
         testApiKey
     };
 })();
