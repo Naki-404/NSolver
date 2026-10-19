@@ -118,6 +118,7 @@ var Naki = (function () {
             language: 'Язык',
             // Cisco NetAcad
             statusNetacad: 'Cisco NetAcad: решение по скриншоту',
+            statusNetacadNoAccess: 'NetAcad: Chrome не пускает расширение на страницу. Обновите вкладку.',
             solveScreen: 'Решить вопрос на экране',
             netacadButton: 'Кнопка на странице', netacadButtonHint: 'Плавающая кнопка «Решить» в углу NetAcad',
             capturePermission: 'Скриншот без панели', capturePermissionHint: 'Нужно для кнопки и хоткея на странице',
@@ -186,6 +187,7 @@ var Naki = (function () {
             hotkeysHint: 'Click a button and press keys — works right away on Coursera course pages and on NetAcad. A key without Ctrl/Alt is ignored while typing.',
             language: 'Language',
             statusNetacad: 'Cisco NetAcad: solving from a screenshot',
+            statusNetacadNoAccess: 'NetAcad: Chrome blocks the extension on this page. Reload the tab.',
             solveScreen: 'Solve the question on screen',
             netacadButton: 'On-page button', netacadButtonHint: 'Floating "Solve" button in the NetAcad corner',
             capturePermission: 'Screenshot without panel', capturePermissionHint: 'Needed for the on-page button and hotkey',

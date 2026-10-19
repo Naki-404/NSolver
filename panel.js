@@ -150,10 +150,39 @@
         return tab;
     }
 
+    // NetAcad hosts and files come from the netacad.js content script entry in the manifest.
+    const NETACAD_SCRIPT = chrome.runtime.getManifest().content_scripts.find(entry => entry.js.includes('netacad.js'));
+    const NETACAD_HOSTS = NETACAD_SCRIPT.matches.map(pattern => pattern.replace(/^\*:\/\/(\*\.)?/, '').replace(/\/.*$/, ''));
+
+    function isNetacadUrl(url) {
+        try {
+            const host = new URL(url).hostname;
+            return NETACAD_HOSTS.some(base => host === base || host.endsWith('.' + base));
+        } catch (e) {
+            return false;
+        }
+    }
+
+    // Chrome may skip the content script on NetAcad: site access limited for the extension, the extension reloaded
+    // while the course was open, a course player opened in a way that bypassed injection. Opening this panel grants
+    // activeTab, so the script can be injected from here; netacad.js ignores a second copy.
+    async function injectNetacad(tab) {
+        await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: NETACAD_SCRIPT.js });
+        await chrome.scripting.executeScript({ target: { tabId: tab.id, allFrames: true }, files: NETACAD_SCRIPT.js })
+            .catch(error => console.warn('[Naki] NetAcad frames not injected:', error.message));
+    }
+
     async function sendToTab(message) {
         const tab = await targetTab();
         if (!tab?.id) throw new Error('no tab');
-        return chrome.tabs.sendMessage(tab.id, message);
+        try {
+            return await chrome.tabs.sendMessage(tab.id, message);
+        } catch (error) {
+            if (!isNetacadUrl(tab.url)) throw error;
+            console.warn('[Naki] No NetAcad script in the tab, injecting it:', error.message);
+            await injectNetacad(tab);
+            return chrome.tabs.sendMessage(tab.id, message);
+        }
     }
 
     let status = { kind: '', key: 'statusChecking', vars: {}, suffix: null };
@@ -189,7 +218,8 @@
             else if (result.questions) setStatus('ready', 'statusQuiz', { n: result.questions }, result.onAttempt ? null : 'statusOpenAttempt');
             else setStatus('course', result.onAttempt ? 'statusWaiting' : 'statusCourse');
         } catch (e) {
-            setStatus('', 'statusNoCourse');
+            const tab = await targetTab().catch(() => null);
+            setStatus('', tab && isNetacadUrl(tab.url) ? 'statusNetacadNoAccess' : 'statusNoCourse');
         }
     }
 

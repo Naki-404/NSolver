@@ -233,5 +233,13 @@
         if (area === 'local' && alive()) Naki.loadSettings().then(applySettings);
     });
     Naki.loadSettings().then(applySettings);
+
+    // The NetAcad course player (netacad.com/launch) re-renders the page and can drop the on-page button.
+    if (isTop) {
+        const timer = setInterval(() => {
+            if (!alive()) clearInterval(timer);
+            else if (state.settings.netacadButton && !document.getElementById(HOST_ID)) ui.ensure();
+        }, 2000);
+    }
     if (isTop) console.log('[Naki] NSolver NetAcad mode loaded — made by Naki: https://github.com/Naki-404/NSolver');
 })();
