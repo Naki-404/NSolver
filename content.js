@@ -114,17 +114,34 @@
         return (doc.body.textContent || '').replace(/\s+/g, ' ').trim();
     }
 
+    // "Select all that apply", "Choose two", "Выберите все"… in the prompt.
+    const MULTIPLE_PROMPT = /select all that apply|all that apply|choose (?:all|two|three|four|2|3|4)|select (?:two|three|four|2|3|4)|pick (?:two|three|2|3)|выберите (?:все|два|три|четыре|несколько|2|3|4)|отметьте все|укажите все/i;
+    const MULTIPLE_TYPE = /checkbox|multiselect|multipleselect|multipleresponse|multianswer|multipleanswer/;
+
+    // Several correct options: checkbox question type, a multi-select flag in the schema, or the prompt says so.
+    // Current Coursera assignments do not always name the type "Checkbox", so every signal counts.
+    function isMultipleChoice(schema, typename, prompt) {
+        if (MULTIPLE_TYPE.test(typename)) return true;
+        for (const [key, value] of Object.entries(schema)) {
+            if (value === true && /multi|checkbox|allowmultiple/i.test(key)) return true;
+            if (typeof value === 'string' && /^(checkbox|multi|multiple)/i.test(value) && /type|mode|selection/i.test(key)) return true;
+        }
+        return MULTIPLE_PROMPT.test(prompt);
+    }
+
     function extractQuestions(parts) {
         return parts.map(part => {
             const schema = part.questionSchema || {};
             const typename = String(schema.__typename || '').toLowerCase();
             const options = (schema.options || []).map(option => htmlToText(option?.display?.htmlWithMetadata?.html));
-            const isChoice = options.length > 0 && (typename.includes('multiplechoice') || typename.includes('checkbox') || typename.includes('choice'));
+            const question = htmlToText(schema.prompt?.htmlWithMetadata?.html);
+            const isChoice = options.length > 0;
             return {
                 type: isChoice ? 'mcq' : 'textArea',
-                multiple: typename.includes('checkbox'),
-                question: htmlToText(schema.prompt?.htmlWithMetadata?.html),
-                options: isChoice ? options : []
+                multiple: isChoice && isMultipleChoice(schema, typename, question),
+                question,
+                options: isChoice ? options : [],
+                typename: schema.__typename || ''
             };
         });
     }
@@ -233,6 +250,19 @@
         }
     }
 
+    // The rendered form is the most reliable signal: checkboxes mean "select all correct options".
+    function markMultipleFromPage(questions) {
+        const containers = findQuestionContainers(questions);
+        questions.forEach((question, i) => {
+            const container = containers[i];
+            if (question.type !== 'mcq' || question.multiple || !container) return;
+            if (container.querySelector('input[type="checkbox"], [role="checkbox"]') && !container.querySelector('input[type="radio"], [role="radio"]')) {
+                question.multiple = true;
+            }
+        });
+        console.log('[Naki] Question types:', questions.map((q, i) => `${i + 1}: ${q.type}${q.multiple ? ' (multiple)' : ''} ${q.typename || ''}`));
+    }
+
     function applySolutions(questions, solutions) {
         const containers = findQuestionContainers(questions);
         let applied = 0;
@@ -308,10 +338,9 @@
             toast(tr('toastSolving', { auto: auto ? tr('toastAuto') : '', n: questions.length, model: options.modelId }), 'info');
             const started = performance.now();
 
-            const [solutions] = await Promise.all([
-                ModelProvider.solveQuizQuestions(questions, options),
-                waitFor(() => document.querySelector('input[type="radio"], input[type="checkbox"], textarea'), 10000)
-            ]);
+            await waitFor(() => document.querySelector('input[type="radio"], input[type="checkbox"], [role="checkbox"], textarea'), 10000);
+            markMultipleFromPage(questions);
+            const solutions = await ModelProvider.solveQuizQuestions(questions.map(({ typename, ...q }) => q), options);
             if (!solutions.length) throw new Error(tr('errEmptySolutions'));
             console.log('[Naki] Solutions:', solutions);
 

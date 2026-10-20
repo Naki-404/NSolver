@@ -2,6 +2,9 @@
 
 Все заметные изменения NSolver: Coursera & NetAcad Solver / AutoPass.
 
+## 2.7.2
+- Coursera: вопросы с несколькими правильными ответами снова отмечаются полностью. Новые задания Coursera не называют тип вопроса «Checkbox», и такой вопрос считался вопросом с одним ответом. Теперь множественный выбор определяется по типу и полям вопроса, по тексту («Select all that apply», «Choose two», «Выберите все») и по самой странице (checkbox вместо radio).
+
 ## 2.7.1
 - Coursera: автосолвер видит нынешние тесты Coursera — «Graded Assignment», module challenge, practice quiz (тип `staffGraded`) и «Test your knowledge» (`ungradedAssignment`); раньше он искал только старые типы `exam`/`quiz`. Письменные задания с рубрикой пропускаются.
 - Coursera: задания открываются через универсальный адрес `/learn/<курс>/item/<id>`, поэтому подходит любой маршрут (`/assignment-submission/`, `/exam/`, `/quiz/`).
