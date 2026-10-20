@@ -163,6 +163,8 @@ var Naki = (function () {
             toastSkipProgress: 'Отмечаю пройденными: {done} из {total}…',
             toastDiscussions: 'Отвечаю в {n} обсуждениях…',
             toastSkipSummary: 'Лекции: {l}, материалы: {r}.', toastSkipDiscussions: ' Обсуждения: {d}.',
+            toastSkipCoach: ' Диалоги и role play: {c}.',
+            toastForumLimit: ' Coursera ограничила число постов на форуме для вашего аккаунта — остальные обсуждения повторите позже (обычно через несколько часов).',
             toastSkipDone: '{summary} Обновите страницу, чтобы увидеть прогресс. Новые курсы могут блокировать отметку.',
             toastSkipError: 'Не удалось отметить материалы: {error}',
             // model provider
@@ -244,6 +246,8 @@ var Naki = (function () {
             toastSkipProgress: 'Marking as completed: {done} of {total}…',
             toastDiscussions: 'Replying in {n} discussions…',
             toastSkipSummary: 'Lectures: {l}, readings: {r}.', toastSkipDiscussions: ' Discussions: {d}.',
+            toastSkipCoach: ' Dialogues and role plays: {c}.',
+            toastForumLimit: ' Coursera has limited forum posts for your account — retry the remaining discussions later (usually a few hours).',
             toastSkipDone: '{summary} Reload the page to see progress. Newer courses may block completion.',
             toastSkipError: 'Could not mark materials: {error}',
             errNoKey: 'No API key for {provider}. Save it in the extension settings.',

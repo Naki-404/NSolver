@@ -430,27 +430,83 @@
         return fetchWithTimeout(url, { method: 'POST', headers, body: JSON.stringify(body) });
     }
 
-    async function answerDiscussions(items, userId, courseId) {
-        const questionIds = [];
-        await runLimited(items, 4, async item => {
-            const response = await fetchWithTimeout(`${API}/onDemandDiscussionPrompts.v1/${userId}~${courseId}~${item.id}?fields=promptType`);
-            const data = await response.json();
-            const id = data?.elements?.[0]?.promptType?.definition?.courseItemForumQuestionId;
-            if (id) questionIds.push(id);
-            return response;
-        });
+    // Items the learner already completed: nothing is sent for them again (no second forum post).
+    async function fetchCompletedItems(userId, courseId) {
+        try {
+            const data = await getJson(`${API}/onDemandCoursesProgress.v1/${userId}~${courseId}`);
+            const items = data?.elements?.[0]?.items || {};
+            return new Set(Object.entries(items).filter(([, value]) => value?.progressState === 'Completed').map(([id]) => id));
+        } catch (error) {
+            console.warn('[Naki] Course progress unavailable:', error.message);
+            return new Set();
+        }
+    }
+
+    const FORUM_PAUSE_MS = 8000;
+
+    // Returns { posted, limited }: Coursera caps forum posts per account; once it says so, posting stops.
+    async function answerDiscussions(items, userId, courseId, onPosted) {
         const replies = ['Interesting question, thanks for sharing.', 'Good point, I will look into this further.', 'Thanks, this helped me understand the topic better.'];
         let posted = 0;
-        for (const id of questionIds) {
+        for (const [i, item] of items.entries()) {
+            const prompt = await getJson(`${API}/onDemandDiscussionPrompts.v1/${userId}~${courseId}~${item.id}?fields=promptType`).catch(() => null);
+            const id = prompt?.elements?.[0]?.promptType?.definition?.courseItemForumQuestionId;
+            if (!id) continue;
             const text = replies[Math.floor(Math.random() * replies.length)];
             const response = await jsonPost(`${API}/onDemandCourseForumAnswers.v1/`, {
                 content: { typeName: 'cml', definition: { dtdId: 'discussion/1', value: `<co-content><text>${text}</text></co-content>` } },
                 courseForumQuestionId: `${courseId}~${id.split('~')[2]}`
             });
-            if (response.ok) posted++;
-            await sleep(4000);
+            if (response.ok) {
+                posted++;
+                if (onPosted) onPosted();
+            } else {
+                const body = await response.text().catch(() => '');
+                console.warn('[Naki] Forum post rejected:', response.status, body.slice(0, 300));
+                if (/RATE_LIMIT|limit has been reached/i.test(body)) return { posted, limited: true };
+            }
+            if (i < items.length - 1) await sleep(FORUM_PAUSE_MS);
         }
-        return posted;
+        return { posted, limited: false };
+    }
+
+    // ------------------------------------------------------------------ Coach items (Dialogue, Role Play)
+    // Coursera counts a Coach dialogue or role play as completed once a session is ended, even right after it
+    // started (verified on Coursera): create a chat session and end it. The item does not say which mode it is,
+    // so Dialogue is tried first and Role Play when Coursera answers that the mode does not match.
+
+    const COACH_MODES = ['COACH_ITEM_DIALOGUE', 'COACH_ITEM_ROLE_PLAY'];
+
+    async function graphql(operation, variables, query) {
+        const headers = { 'Content-Type': 'application/json', Accept: 'application/json', 'apollographql-client-name': 'ondemand', 'operation-name': operation };
+        const token = csrfToken();
+        if (token) headers['X-CSRF3-Token'] = token;
+        const response = await fetchWithTimeout(`https://www.coursera.org/graphql-gateway?opname=${operation}`, {
+            method: 'POST', headers, body: JSON.stringify([{ operationName: operation, variables, query }])
+        });
+        const data = await response.json().catch(() => null);
+        return Array.isArray(data) ? data[0] : data;
+    }
+
+    async function completeCoachItem(item, userId, courseId) {
+        const courseraContext = { courseId, itemId: item.id, courseBranchId: courseId };
+        for (const coachModeId of COACH_MODES) {
+            const session = await graphql('AiCoachPlatform_CreateChatSession',
+                { input: { title: `coachItem-${courseId}-${item.id}`, userId: String(userId) } },
+                'mutation AiCoachPlatform_CreateChatSession($input: AiCoach_CreateChatSessionInput!) { AiCoach_CreateChatSession(input: $input) { id __typename } }');
+            const chatSessionId = session?.data?.AiCoach_CreateChatSession?.id;
+            if (!chatSessionId) return false;
+            const ended = await graphql('CoachItem_EndSession',
+                { input: { chatSessionId, message: 'Generate final session summary', coachModeId, terminalActionId: 'STUCK_END', courseraContext, additionalContext: [] } },
+                'mutation CoachItem_EndSession($input: CoachItem_EndSessionInput!) { CoachItem_EndSession(input: $input) { chatSessionId itemCompletionHandled session { status __typename } __typename } }');
+            if (ended?.data?.CoachItem_EndSession) return true;
+            const message = ended?.errors?.[0]?.message || '';
+            if (!/coachModeId does not match/i.test(message)) {
+                console.warn('[Naki] Coach item not completed:', item.id, message);
+                return false;
+            }
+        }
+        return false;
     }
 
     async function skipContent() {
@@ -488,10 +544,14 @@
                 return;
             }
 
-            const byType = type => items.filter(item => item.contentSummary?.typeName === type);
+            const completed = await fetchCompletedItems(state.userId, courseId);
+            const byType = type => items.filter(item => item.contentSummary?.typeName === type && !completed.has(item.id) && !item.isLocked);
             const lectures = byType('lecture');
             const readings = byType('supplement');
-            const total = lectures.length + readings.length;
+            const coachItems = byType('coach');
+            const discussions = state.settings.skipDiscussions ? byType('discussionPrompt') : [];
+            const total = lectures.length + readings.length + coachItems.length + discussions.length;
+            console.log('[Naki] Skip pending:', { lectures: lectures.length, readings: readings.length, coach: coachItems.length, discussions: discussions.length, alreadyCompleted: completed.size });
             let processed = 0;
             progress = toast(tr('toastSkipping', { lectures: lectures.length, readings: readings.length }), 'info', 0);
             const tick = () => {
@@ -506,14 +566,19 @@
                 `${API}/onDemandSupplementCompletions.v1`,
                 { userId: state.userId, courseId, itemId: item.id }), tick);
 
+            let doneCoach = 0;
+            for (const item of coachItems) {
+                if (await completeCoachItem(item, state.userId, courseId).catch(() => false)) doneCoach++;
+                tick();
+            }
+
             let summary = tr('toastSkipSummary', { l: `${doneLectures}/${lectures.length}`, r: `${doneReadings}/${readings.length}` });
-            if (state.settings.skipDiscussions) {
-                const discussions = byType('discussionPrompt');
-                if (discussions.length) {
-                    progress.update(tr('toastDiscussions', { n: discussions.length }), 'info', 0);
-                    const posted = await answerDiscussions(discussions, state.userId, courseId);
-                    summary += tr('toastSkipDiscussions', { d: `${posted}/${discussions.length}` });
-                }
+            if (coachItems.length) summary += tr('toastSkipCoach', { c: `${doneCoach}/${coachItems.length}` });
+            if (discussions.length) {
+                progress.update(tr('toastDiscussions', { n: discussions.length }), 'info', 0);
+                const { posted, limited } = await answerDiscussions(discussions, state.userId, courseId, tick);
+                summary += tr('toastSkipDiscussions', { d: `${posted}/${discussions.length}` });
+                if (limited) summary += tr('toastForumLimit');
             }
             progress.update(tr('toastSkipDone', { summary }), 'success', 12000);
         } catch (error) {
