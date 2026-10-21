@@ -40,6 +40,10 @@
             <section class="card">
                 <div class="card-title"><h2>Quiz Solver</h2><span id="modelBadge"></span></div>
                 <button class="btn" id="solve" type="button">${ICONS.bolt}<span class="btn-label" data-i18n="solve"></span><kbd id="solveKbd"></kbd></button>
+                <div class="row" id="courseContextRow">
+                    <label class="label-text" for="courseContext"><span data-i18n="courseContext"></span><small data-i18n="courseContextHint"></small></label>
+                    <label class="switch"><input type="checkbox" id="courseContext"><span class="track"></span></label>
+                </div>
                 <div class="row" id="autoSolveRow">
                     <label class="label-text" for="autoSolve"><span data-i18n="autoSolve"></span><small data-i18n="autoSolveHint"></small></label>
                     <label class="switch"><input type="checkbox" id="autoSolve"><span class="track"></span></label>
@@ -210,6 +214,7 @@
     function showSite(site) {
         const netacad = site === 'netacad';
         $('autoSolveRow').hidden = netacad;
+        $('courseContextRow').hidden = netacad;
         $('skipDiscussionsRow').hidden = netacad;
         $('netacadSkipHint').hidden = !netacad;
         $('netacadCard').hidden = !netacad;
@@ -336,6 +341,7 @@
         if (document.activeElement !== $('apiKey')) $('apiKey').value = settings.apiKeys[settings.provider] || '';
         $('modelBadge').textContent = `${ModelProvider.providerName(settings.provider)} · ${Naki.activeModel(settings)}`;
         $('autoSolve').checked = settings.autoSolve;
+        $('courseContext').checked = settings.courseContext;
         $('skipDiscussions').checked = settings.skipDiscussions;
         $('netacadButton').checked = settings.netacadButton;
         $('autopilotRetakes').value = String(settings.autopilotRetakes);
@@ -415,6 +421,7 @@
     });
 
     $('skipDiscussions').addEventListener('change', () => Naki.saveSettings({ skipDiscussions: $('skipDiscussions').checked }));
+    $('courseContext').addEventListener('change', () => Naki.saveSettings({ courseContext: $('courseContext').checked }));
     $('netacadButton').addEventListener('change', () => Naki.saveSettings({ netacadButton: $('netacadButton').checked }));
 
     let keyVisible = false;

@@ -309,6 +309,166 @@
         return check();
     }
 
+    // ------------------------------------------------------------------ course materials for the solver
+    // Many quizzes check what this very course teaches. Lecture transcripts and readings are downloaded once per course
+    // (kept in chrome.storage.local for two weeks), cut into chunks, and every request to the model gets the chunks
+    // closest to its questions (BM25 over words), preferring the quiz's own module.
+
+    const MATERIALS_KEY = 'nakiMaterials:';              // + course slug → { savedAt, docs: [{ order, type, title, module, text }] }
+    const MATERIALS_INDEX_KEY = 'nakiMaterialsIndex';    // most recently used slugs; older courses are evicted
+    const MATERIALS_TTL_MS = 14 * 24 * 60 * 60 * 1000;
+    const MATERIALS_MAX_COURSES = 6;
+    const CONTEXT_CHARS = 24000;                         // course excerpts per request (~6k tokens)
+    const CHUNK_CHARS = 1200;
+    const materialsCache = new Map();                    // slug → docs, for this page
+
+    async function courseMaterialsFor(slug) {
+        if (materialItems(state.courseMaterials).length) return state.courseMaterials;
+        const fetched = await fetchCourseMaterials(slug);
+        if (materialItems(fetched).length) state.courseMaterials = fetched;
+        return fetched;
+    }
+
+    async function lectureText(courseId, itemId) {
+        const data = await getJson(`${API}/onDemandLectureVideos.v1/${courseId}~${itemId}?includes=video&fields=onDemandVideos.v1(subtitlesTxt)`);
+        const subtitles = data?.linked?.['onDemandVideos.v1']?.[0]?.subtitlesTxt || {};
+        const url = subtitles.en || subtitles.ru || Object.values(subtitles)[0];
+        if (!url) return '';
+        const response = await fetchWithTimeout(url.startsWith('http') ? url : `https://www.coursera.org${url}`);
+        return response.ok ? response.text() : '';
+    }
+
+    async function readingText(courseId, itemId) {
+        const data = await getJson(`${API}/onDemandSupplements.v1/${courseId}~${itemId}?includes=asset&fields=openCourseAssets.v1(typeName),openCourseAssets.v1(definition)`);
+        const definition = data?.linked?.['openCourseAssets.v1']?.[0]?.definition || {};
+        const html = definition.renderableHtmlWithMetadata?.renderableHtml || definition.value || '';
+        // Keep paragraphs, headings and list items apart once the tags are gone.
+        return htmlToText(html.replace(/<\/(p|div|li|h[1-6]|tr|td|th|blockquote|pre)>|<br\s*\/?>/gi, '$& '));
+    }
+
+    async function rememberCourse(slug) {
+        const { [MATERIALS_INDEX_KEY]: index = [] } = await chrome.storage.local.get(MATERIALS_INDEX_KEY);
+        const next = [slug, ...index.filter(other => other !== slug)];
+        await chrome.storage.local.set({ [MATERIALS_INDEX_KEY]: next.slice(0, MATERIALS_MAX_COURSES) });
+        const evicted = next.slice(MATERIALS_MAX_COURSES);
+        if (evicted.length) await chrome.storage.local.remove(evicted.map(other => MATERIALS_KEY + other));
+    }
+
+    // Lecture transcripts and readings of the course, from the cache or downloaded (onProgress(done, total)).
+    async function loadCourseDocs(slug, onProgress) {
+        if (materialsCache.has(slug)) return materialsCache.get(slug);
+        const key = MATERIALS_KEY + slug;
+        const stored = (await chrome.storage.local.get(key))[key];
+        if (stored && Date.now() - stored.savedAt < MATERIALS_TTL_MS && stored.docs?.length) {
+            materialsCache.set(slug, stored.docs);
+            rememberCourse(slug).catch(() => { });
+            return stored.docs;
+        }
+        const materials = await courseMaterialsFor(slug);
+        const courseId = materials?.linked?.['onDemandGradingParameters.v1']?.[0]?.id || await fetchCourseId(slug);
+        const sources = orderedCourseItems(materials)
+            .map((entry, order) => ({ ...entry, order }))
+            .filter(({ item }) => ['lecture', 'supplement'].includes(item.contentSummary?.typeName) && !item.isLocked);
+        const docs = [];
+        let done = 0;
+        await runLimited(sources, 6, async ({ item, module, order }) => {
+            const type = item.contentSummary.typeName;
+            const raw = type === 'lecture' ? await lectureText(courseId, item.id) : await readingText(courseId, item.id);
+            const text = String(raw || '').replace(/\s+/g, ' ').trim();
+            if (text.length > 40) docs.push({ order, type, title: item.name, module, text });
+        }, () => onProgress && onProgress(++done, sources.length));
+        docs.sort((a, b) => a.order - b.order);
+        if (docs.length) {
+            await chrome.storage.local.set({ [key]: { savedAt: Date.now(), docs } });
+            await rememberCourse(slug);
+        }
+        materialsCache.set(slug, docs);
+        console.log(`[Naki] Course materials: ${docs.length} of ${sources.length} lectures/readings, ${docs.reduce((sum, doc) => sum + doc.text.length, 0)} chars`);
+        return docs;
+    }
+
+    const STOPWORDS = new Set(('the and for that this with from what which when where who whom whose why how are was were been being have has had ' +
+        'does did not but can could should would will shall may might must into onto than then them they their there these those your you our its ' +
+        'his her him she also any all each other such only own same very just about above below after before between both during through under over ' +
+        'again further once here more most some few nor too out off per via use used using following true false best answer question questions select ' +
+        'choose correct incorrect statement statements option options describe describes which что как это для или его она они при над под все').split(' '));
+    const wordsOf = text => (String(text).toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) || []).filter(word => !STOPWORDS.has(word));
+
+    // Overlapping chunks, cut at word boundaries.
+    function chunkDocs(docs) {
+        const chunks = [];
+        for (const doc of docs) {
+            let start = 0;
+            while (start < doc.text.length) {
+                let end = Math.min(doc.text.length, start + CHUNK_CHARS);
+                if (end < doc.text.length) end = doc.text.lastIndexOf(' ', end) > start + CHUNK_CHARS / 2 ? doc.text.lastIndexOf(' ', end) : end;
+                const text = doc.text.slice(start, end).trim();
+                chunks.push({ doc, start, text, words: wordsOf(text) });
+                if (end >= doc.text.length) break;
+                start = Math.max(end - 200, start + 1);
+            }
+        }
+        return chunks;
+    }
+
+    // BM25 between the questions and every chunk; the quiz's module (and the one before it) is preferred.
+    function courseExcerpts(chunks, questions, quizModule) {
+        const query = new Set(questions.flatMap(q => wordsOf(`${q.question} ${(q.options || []).join(' ')}`)));
+        if (!query.size || !chunks.length) return '';
+        const df = new Map();
+        for (const chunk of chunks) for (const word of new Set(chunk.words)) if (query.has(word)) df.set(word, (df.get(word) || 0) + 1);
+        const total = chunks.length;
+        const averageLength = chunks.reduce((sum, chunk) => sum + chunk.words.length, 0) / total || 1;
+        const scored = [];
+        for (const chunk of chunks) {
+            const tf = new Map();
+            for (const word of chunk.words) if (query.has(word)) tf.set(word, (tf.get(word) || 0) + 1);
+            let score = 0;
+            for (const [word, count] of tf) {
+                const idf = Math.log(1 + (total - df.get(word) + 0.5) / (df.get(word) + 0.5));
+                score += idf * (count * 2.2) / (count + 1.2 * (0.25 + 0.75 * chunk.words.length / averageLength));
+            }
+            if (!score) continue;
+            const module = chunk.doc.module;
+            if (quizModule !== null && module !== null) {
+                if (module === quizModule) score *= 1.5;
+                else if (module === quizModule - 1) score *= 1.15;
+                else if (module > quizModule) score *= 0.7;
+            }
+            scored.push({ chunk, score });
+        }
+        scored.sort((a, b) => b.score - a.score);
+        const picked = [];
+        let used = 0;
+        for (const { chunk } of scored) {
+            if (used + chunk.text.length > CONTEXT_CHARS) continue;
+            picked.push(chunk);
+            used += chunk.text.length + 60;
+            if (used > CONTEXT_CHARS - 400) break;
+        }
+        picked.sort((a, b) => a.doc.order - b.doc.order || a.start - b.start);
+        return picked.map(chunk => `[${chunk.doc.type === 'lecture' ? 'Lecture' : 'Reading'}: ${chunk.doc.title}] ${chunk.text}`).join('\n\n');
+    }
+
+    // contextFor(questions) for ModelProvider, or null when the course materials are off or unavailable.
+    async function courseContext(progressToast) {
+        if (!state.settings.courseContext) return null;
+        const slug = courseSlug();
+        if (!slug) return null;
+        try {
+            const docs = await loadCourseDocs(slug, (done, total) => progressToast?.update(tr('toastMaterials', { done, total }), 'info', 0));
+            if (!docs.length) return null;
+            const chunks = chunkDocs(docs);
+            const path = location.pathname.split('/');
+            const current = orderedCourseItems(await courseMaterialsFor(slug)).find(entry => path.includes(entry.item.id));
+            const quizModule = current ? current.module : null;
+            return questions => courseExcerpts(chunks, questions, quizModule);
+        } catch (error) {
+            console.warn('[Naki] Course materials unavailable:', error.message);
+            return null;
+        }
+    }
+
     // ------------------------------------------------------------------ quiz solver
 
     // Returns the number of answered questions (0 when nothing was solved).
@@ -335,7 +495,10 @@
             const questions = state.questions;
             const settings = state.settings;
             const options = { provider: settings.provider, apiKey: Naki.activeKey(settings), modelId: Naki.activeModel(settings), lang: settings.lang };
-            toast(tr('toastSolving', { auto: auto ? tr('toastAuto') : '', n: questions.length, model: options.modelId }), 'info');
+            const solvingToast = toast(tr('toastSolving', { auto: auto ? tr('toastAuto') : '', n: questions.length, model: options.modelId }), 'info', 0);
+            options.contextFor = await courseContext(solvingToast);
+            solvingToast.update(tr('toastSolving', { auto: auto ? tr('toastAuto') : '', n: questions.length, model: options.modelId }) +
+                (options.contextFor ? tr('toastWithMaterials') : ''), 'info', 6000);
             const started = performance.now();
 
             await waitFor(() => document.querySelector('input[type="radio"], input[type="checkbox"], [role="checkbox"], textarea'), 10000);
@@ -646,8 +809,8 @@
     const itemUrl = (run, item) => `https://www.coursera.org/learn/${run.slug}/item/${item.id}`;
     const onItem = (run, item) => location.pathname.startsWith(`/learn/${run.slug}/`) && location.pathname.split('/').includes(item.id);
 
-    // Quizzes in course order (modules → lessons → items); falls back to the API order.
-    function courseQuizzes(materials) {
+    // Course items in course order (modules → lessons → items) with the module position; falls back to the API order.
+    function orderedCourseItems(materials) {
         const items = materialItems(materials);
         const byId = new Map(items.map(item => [item.id, item]));
         const linked = materials?.linked || {};
@@ -655,13 +818,18 @@
         const lessons = new Map((Object.entries(linked).find(([key]) => /^onDemandCourseMaterialLessons\.v\d+$/i.test(key))?.[1] || []).map(lesson => [lesson.id, lesson]));
         const moduleOrder = materials?.elements?.[0]?.moduleIds || modules.map(module => module.id);
         const ordered = [];
-        for (const moduleId of moduleOrder) {
-            const module = modules.find(m => m.id === moduleId);
-            for (const lessonId of module?.lessonIds || []) {
-                for (const itemId of lessons.get(lessonId)?.itemIds || []) if (byId.has(itemId)) ordered.push(byId.get(itemId));
+        moduleOrder.forEach((moduleId, module) => {
+            const entry = modules.find(m => m.id === moduleId);
+            for (const lessonId of entry?.lessonIds || []) {
+                for (const itemId of lessons.get(lessonId)?.itemIds || []) if (byId.has(itemId)) ordered.push({ item: byId.get(itemId), module });
             }
-        }
-        return (ordered.length ? ordered : items)
+        });
+        return ordered.length ? ordered : items.map(item => ({ item, module: null }));
+    }
+
+    // Quizzes in course order.
+    function courseQuizzes(materials) {
+        return orderedCourseItems(materials).map(entry => entry.item)
             // Rubric-graded items are written work reviewed by people, not quizzes.
             .filter(item => QUIZ_TYPES.includes(item.contentSummary?.typeName) && !item.isLocked &&
                 !(item.contentSummary?.definition?.assignmentFeatures || []).includes('ASSIGNMENT_RUBRICS'))
@@ -742,6 +910,11 @@
         if (!items.length) {
             toast(tr('autopilotNoQuizzes'), 'info', 8000);
             return;
+        }
+        if (state.settings.courseContext) {
+            const loading = toast(tr('toastMaterials', { done: 0, total: '…' }), 'info', 0);
+            await loadCourseDocs(slug, (done, total) => loading.update(tr('toastMaterials', { done, total }), 'info', 0)).catch(error => console.warn('[Naki] Course materials unavailable:', error.message));
+            loading.update(tr('toastMaterialsReady'), 'success', 3000);
         }
         const run = { id: String(Date.now()), slug, items, index: 0, attempt: 0, phase: 'open', phaseAt: Date.now(), retakes: state.settings.autopilotRetakes, results: [] };
         await saveRun(run);

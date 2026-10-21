@@ -17,6 +17,7 @@ var Naki = (function () {
         apiKeys: { octava: '', anthropic: '', openai: '', gemini: '' },
         models: { octava: 'gpt-6-luna', anthropic: 'claude-opus-5-5', openai: 'gpt-5.5', gemini: 'gemini-3.8-flash' },
         autoSolve: false,
+        courseContext: true, // Coursera: lecture transcripts and readings go into the prompt
         skipDiscussions: false,
         netacadButton: true,
         autopilotRetakes: 2, // automatic retakes of a failed quiz: 0 (leave it to the user), 2 or 3
@@ -38,7 +39,8 @@ var Naki = (function () {
     }
 
     async function loadSettings() {
-        const stored = await chrome.storage.local.get(null);
+        // Only settings and legacy keys: storage also holds cached course materials (megabytes).
+        const stored = await chrome.storage.local.get([...Object.keys(DEFAULT_SETTINGS), 'apiKey', 'key', 'model', 'quiz']);
         // Keys used by earlier versions of the extension.
         const legacyKey = stored.apiKey || stored.key;
         if (legacyKey && !stored.apiKeys?.octava) stored.apiKeys = { ...stored.apiKeys, octava: legacyKey };
@@ -105,6 +107,9 @@ var Naki = (function () {
             statusCourse: 'Курс Coursera открыт',
             solve: 'Решить тест', starting: 'Запускаю…',
             autoSolve: 'Авто-решение', autoSolveHint: 'Сразу при открытии попытки теста',
+            courseContext: 'Учитывать материалы курса', courseContextHint: 'Лекции и чтения курса в запросе: точнее, но больше токенов',
+            toastMaterials: 'Загружаю материалы курса: {done} из {total}…', toastMaterialsReady: 'Материалы курса загружены.',
+            toastWithMaterials: ' (с материалами курса)',
             skipTitle: 'Пропуск материалов', skip: 'Пропустить материалы',
             skipDiscussions: 'Также обсуждения', skipDiscussionsHint: 'Короткий шаблонный ответ в каждом обсуждении',
             provider: 'API', model: 'Модель', loadModels: 'Обновить список моделей с API',
@@ -191,6 +196,9 @@ var Naki = (function () {
             statusCourse: 'Coursera course open',
             solve: 'Solve quiz', starting: 'Starting…',
             autoSolve: 'Auto-solve', autoSolveHint: 'Run as soon as a quiz attempt opens',
+            courseContext: 'Use course materials', courseContextHint: 'Course lectures and readings go into the prompt: more accurate, more tokens',
+            toastMaterials: 'Loading course materials: {done} of {total}…', toastMaterialsReady: 'Course materials loaded.',
+            toastWithMaterials: ' (with course materials)',
             skipTitle: 'Skip materials', skip: 'Skip materials',
             skipDiscussions: 'Discussions too', skipDiscussionsHint: 'Posts a short template reply in each discussion',
             provider: 'API', model: 'Model', loadModels: 'Refresh the model list from the API',

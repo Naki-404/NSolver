@@ -37,7 +37,8 @@ var ModelProvider = (function () {
 
     // ---------------------------------------------------------------- prompt
 
-    function buildQuizPrompt(questions) {
+    // context: excerpts from the course's own lectures and readings (optional).
+    function buildQuizPrompt(questions, context = '') {
         const data = questions.map((q, index) => {
             const item = { index, type: q.type, question: q.question };
             if (q.type === 'mcq') {
@@ -58,13 +59,21 @@ Rules:
 3. Every answer object must contain "index" equal to the question's "index".
 4. Output ONLY a valid JSON array with exactly ${questions.length} objects, ordered by "index".
    No markdown, no code fences, no explanations.
-
+${context ? `
+Course material excerpts (lecture transcripts and readings of this very course):
+<<<
+${context}
+>>>
+Base your answers on these excerpts first: the quiz checks what this course teaches, so when the course states a
+definition, number, list or recommendation, answer exactly the way the course does, even if other sources say otherwise.
+Use general knowledge only for what the excerpts do not cover.
+` : ''}
 Questions:
 ${JSON.stringify(data, null, 2)}`;
     }
 
-    function buildCorrectionPrompt(questions, problems) {
-        return `${buildQuizPrompt(questions)}
+    function buildCorrectionPrompt(questions, problems, context = '') {
+        return `${buildQuizPrompt(questions, context)}
 
 Your previous answer was invalid: ${problems.join('; ')}.
 Return the corrected JSON array only.`;
@@ -438,8 +447,11 @@ Return the corrected JSON array only.`;
         return { solutions, problems };
     }
 
+    // options.contextFor(questions) → course excerpts for this chunk of questions (optional).
     async function solveChunk(questions, options) {
-        const { text } = await generateContent({ ...options, prompt: buildQuizPrompt(questions) });
+        let context = '';
+        try { context = options.contextFor ? (await options.contextFor(questions)) || '' : ''; } catch (e) { console.warn('[Naki] Course context unavailable:', e.message); }
+        const { text } = await generateContent({ ...options, prompt: buildQuizPrompt(questions, context) });
         let result;
         try {
             result = normalizeSolutions(questions, toSolutionList(parseJsonResponse(text, options.lang), options.lang));
@@ -449,7 +461,7 @@ Return the corrected JSON array only.`;
         if (!result.problems.length) return result.solutions;
 
         console.warn('[Naki] Invalid answer, asking the model to correct it:', result.problems);
-        const retry = await generateContent({ ...options, prompt: buildCorrectionPrompt(questions, result.problems) });
+        const retry = await generateContent({ ...options, prompt: buildCorrectionPrompt(questions, result.problems, context) });
         const fixed = normalizeSolutions(questions, toSolutionList(parseJsonResponse(retry.text, options.lang), options.lang));
         if (fixed.problems.length) console.warn('[Naki] Answer still has problems, applying what is valid:', fixed.problems);
         return fixed.solutions;
