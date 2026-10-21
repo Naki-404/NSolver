@@ -237,3 +237,8 @@ select { text-overflow: ellipsis; }
 /* materials base card */
 .materials-actions { display: flex; gap: 6px; }
 .materials-actions .btn.small { flex: 1; width: auto; }
+.compact-number {
+    width: 72px; flex: none; height: 30px; padding: 0 8px; font: inherit; font-size: 12px; text-align: center;
+    border-radius: 10px; border: 1px solid var(--border); background: var(--surface-2); color: var(--text); outline: none;
+}
+.compact-number:focus { border-color: rgba(139, 92, 246, .7); }

@@ -18,7 +18,7 @@ async function injectIntoOpenTabs() {
     for (const tab of tabs) {
         try {
             await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['interceptor.js'], world: 'MAIN' });
-            await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['shared.js', 'model-provider.js', 'content.js'] });
+            await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['shared.js', 'materials-core.js', 'model-provider.js', 'file-text.js', 'content.js'] });
         } catch (error) {
             console.warn('[Naki] Could not attach to tab', tab.id, error.message);
         }
@@ -27,7 +27,7 @@ async function injectIntoOpenTabs() {
     for (const tab of netacadTabs) {
         try {
             await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['netacad-main.js'], world: 'MAIN' });
-            await chrome.scripting.executeScript({ target: { tabId: tab.id, allFrames: true }, files: ['shared.js', 'model-provider.js', 'netacad.js'] });
+            await chrome.scripting.executeScript({ target: { tabId: tab.id, allFrames: true }, files: ['shared.js', 'materials-core.js', 'model-provider.js', 'netacad.js'] });
         } catch (error) {
             console.warn('[Naki] Could not attach to tab', tab.id, error.message);
         }

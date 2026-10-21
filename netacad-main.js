@@ -92,6 +92,41 @@
         return { ready: true, done, failed, total: targets.length };
     }
 
+    // ---------------------------------------------------------------- module texts for the materials base
+    // Every page of the loaded module as plain text: component titles, bodies and items, and for questions the
+    // question with its correct options (from the course data), which helps with quizzes built on the same topics.
+
+    const courseOf = url => (url.match(/\/courses\/([^/]+)\/[^/]+\/[^/]+\/components\.json/) || [])[1] || null;
+    const plain = html => {
+        const text = new DOMParser().parseFromString(String(html || '').replace(/<\/(p|div|li|h[1-6]|tr|td|th)>|<br\s*\/?>/gi, '$& '), 'text/html').body.textContent || '';
+        return text.replace(/\{\{[^}]*\}\}/g, '').replace(/\s+/g, ' ').trim();
+    };
+
+    function componentText(model) {
+        const parts = [plain(get(model, 'displayTitle') || get(model, 'title')), plain(get(model, 'body'))];
+        const items = get(model, '_items') || [];
+        if (get(model, '_isQuestionType')) {
+            const correct = items.filter(item => item._shouldBeSelected).map(item => plain(item.text || item.title || item.body));
+            if (correct.length) parts.push(`Correct answer: ${correct.join('; ')}.`);
+        } else {
+            for (const item of items) parts.push([item.title, item.body, item.text, item.strapline].map(plain).filter(Boolean).join(': '));
+        }
+        return parts.filter(Boolean).join(' ');
+    }
+
+    function texts() {
+        const found = findCourse();
+        if (!found) return { ready: false };
+        const { course: model, win } = found;
+        const urls = win.performance.getEntriesByType('resource').map(entry => entry.name).filter(url => /\/components\.json/.test(url));
+        const pages = model.getAllDescendantModels(true).filter(m => get(m, '_type') === 'page');
+        const docs = pages.map(page => ({
+            title: plain(get(page, 'displayTitle') || get(page, 'title')) || String(get(page, '_id')),
+            text: page.getAllDescendantModels(true).filter(m => get(m, '_type') === 'component').map(componentText).filter(Boolean).join('\n')
+        })).filter(doc => doc.text.length > 40);
+        return { ready: true, courseId: courseOf(urls.pop() || ''), packageId: packageId(win), title: String(get(model, 'title') || ''), docs };
+    }
+
     // ---------------------------------------------------------------- quizzes (Adapt assessments)
     // Every "Check Your Understanding" and module quiz is an article with _assessment._isEnabled. Flow verified on
     // NetAcad: Start → one question at a time (answer + Submit arrow) → "Submit My Assessment" (confirm checkbox +
@@ -297,11 +332,16 @@
         }
     }
 
-    async function runQuizzes({ retakes = 0, dryRun = false } = {}) {
+    // "Check Your Understanding" activities are practice: they are not part of the course grade.
+    const PRACTICE = /check your understanding|проверьте (себя|свои знания|своё понимание)|проверка понимания|compruebe su comprensión/i;
+    const isPractice = article => PRACTICE.test(articleState(article).title) || get(article, '_assessment')?._assessmentWeight === 0;
+
+    async function runQuizzes({ retakes = 0, dryRun = false, gradedOnly = true } = {}) {
         const found = findCourse();
         if (!found) return { ready: false };
         const results = [];
         for (const article of assessmentArticles(found.course)) {
+            if (gradedOnly && isPractice(article)) continue;
             const id = get(article, '_id');
             const result = await runAssessment(id, retakes, dryRun);
             results.push(result);
@@ -322,6 +362,7 @@
         try {
             if (data.request === 'complete') result = await completeModule();
             else if (data.request === 'quizzes') result = await runQuizzes(data.options || {});
+            else if (data.request === 'texts') result = texts();
             else result = status();
         } catch (error) {
             result = { ready: false, error: error.message };

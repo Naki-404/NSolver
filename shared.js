@@ -18,10 +18,12 @@ var Naki = (function () {
         apiKeys: { octava: '', anthropic: '', openai: '', gemini: '' },
         models: { octava: 'gpt-6-luna', anthropic: 'claude-opus-5-5', openai: 'gpt-5.5', gemini: 'gemini-3.8-flash' },
         autoSolve: false,
-        courseContext: true, // Coursera: lecture transcripts and readings go into the prompt
+        courseContext: true, // course texts from the materials base go into the prompt (Coursera and NetAcad)
+        materialsTtlDays: 14, // a downloaded Coursera course is downloaded again after this many days
         skipDiscussions: false,
         netacadButton: true,
         autopilotRetakes: 2, // automatic retakes of a failed quiz: 0 (leave it to the user), 2 or 3
+        autopilotPeer: true, // Coursera autopilot: submit graded peer-reviewed assignments and review classmates
         hotkeys: {
             solve: { code: 'KeyK', key: 'K', alt: true, ctrl: false, shift: false, meta: false },
             skip: null
@@ -36,6 +38,8 @@ var Naki = (function () {
         if (!PROVIDER_IDS.includes(settings.provider)) settings.provider = 'octava';
         if (settings.lang !== 'en') settings.lang = 'ru';
         if (![0, 2, 3].includes(settings.autopilotRetakes)) settings.autopilotRetakes = DEFAULT_SETTINGS.autopilotRetakes;
+        settings.materialsTtlDays = Math.round(Number(settings.materialsTtlDays));
+        if (!(settings.materialsTtlDays >= 1 && settings.materialsTtlDays <= 365)) settings.materialsTtlDays = DEFAULT_SETTINGS.materialsTtlDays;
         return settings;
     }
 
@@ -108,16 +112,18 @@ var Naki = (function () {
             statusCourse: 'Курс Coursera открыт',
             solve: 'Решить тест', starting: 'Запускаю…',
             autoSolve: 'Авто-решение', autoSolveHint: 'Сразу при открытии попытки теста',
-            courseContext: 'Учитывать материалы курса', courseContextHint: 'Лекции и чтения курса в запросе: точнее, но больше токенов',
+            courseContext: 'Учитывать материалы курса', courseContextHint: 'Тексты курса из базы материалов в запросе: точнее, но больше токенов',
             toastMaterials: 'Загружаю материалы курса: {done} из {total}…', toastMaterialsReady: 'Материалы курса загружены.',
             toastWithMaterials: ' (с материалами курса)',
             toastMaterialsLoaded: 'Материалов курса в базе: {n}.',
             // materials base
             materialsTitle: 'База материалов', materialsSummary: 'Курсов: {courses} · {size}',
-            materialsEmpty: 'Пока пусто: материалы скачиваются при первом тесте курса Coursera.',
+            materialsEmpty: 'Пока пусто: материалы собираются при первом тесте курса Coursera или NetAcad.',
+            materialsTtl: 'Обновлять через, дней', materialsTtlHint: 'Coursera: курс скачивается заново, когда база старше. Курсы с ручными правками не обновляются',
             materialsOpen: 'Открыть базу', materialsLoad: 'Загрузить этот курс',
-            mbHint: 'Это то, что NSolver передаёт модели вместе с вопросами Coursera. Выключенные материалы не используются. Ручные правки и заметки сохраняются, когда курс скачивается заново.',
-            mbCourses: 'Курсы', mbNoCourses: 'Курсов в базе пока нет. Откройте курс Coursera и нажмите «Загрузить этот курс» в окне расширения или решите тест.',
+            mbHint: 'Это то, что NSolver передаёт модели вместе с вопросами Coursera и NetAcad. Выключенные материалы не используются. Ручные правки и заметки сохраняются, когда курс скачивается заново.',
+            mbCourses: 'Курсы', mbNoCourses: 'Курсов в базе пока нет. Откройте курс Coursera или NetAcad и нажмите «Загрузить этот курс» в окне расширения или решите тест.',
+            mbPage: 'Страница',
             mbSelect: 'Выберите курс слева.', mbSearch: 'Поиск по названию и тексту…', mbNothingFound: 'Ничего не найдено.',
             mbAddNote: 'Добавить свой материал', mbNoteTitle: 'Заголовок', mbNoteText: 'Текст: конспект, определения, ответы преподавателя…', mbAdd: 'Добавить',
             mbExport: 'Экспорт JSON', mbImport: 'Импорт JSON', mbDeleteCourse: 'Удалить курс',
@@ -157,7 +163,8 @@ var Naki = (function () {
             netacadSkipComponents: 'компоненты', netacadSkipVideos: 'видео',
             // quiz autopilot
             autopilotTitle: 'Автосолвер квизов', autopilotRun: 'Пройти весь курс', autopilotConfirm: 'Нажмите ещё раз: квизы будут отправлены',
-            autopilotHint: 'Все квизы курса по порядку, с отправкой. NetAcad: ещё и материалы; экзамены не трогаются',
+            autopilotHint: 'Только задания, которые идут в оценку, по порядку, с отправкой. NetAcad: ещё и материалы; экзамены не трогаются',
+            autopilotPeer: 'Задания с взаимной проверкой', autopilotPeerHint: 'Coursera: сдать работу (текст или файл) и проверить работы других, сколько требует курс',
             autopilotRetakes: 'Если квиз не сдан', autopilotRetakes0: 'Не пересдавать', autopilotRetakes2: '2 пересдачи', autopilotRetakes3: '3 пересдачи',
             autopilotBusy: 'Автосолвер уже работает…',
             autopilotStopped: 'Автосолвер остановлен.', autopilotStopping: 'Автосолвер остановится после текущего модуля.',
@@ -165,9 +172,13 @@ var Naki = (function () {
             autopilotModule: 'Автосолвер — модуль {n} из {total}: {title}…',
             autopilotNotOpened: 'модуль не открылся',
             autopilotDone: 'Готово: модулей {modules}, квизов сдано {passed}, не сдано {failed}, материалов засчитано {materials}.',
-            autopilotNoQuizzes: 'В курсе нет квизов для автосолвера.',
+            autopilotNoQuizzes: 'В курсе нет оцениваемых заданий для автосолвера (практические пропускаются).',
             autopilotItem: 'Автосолвер — {n} из {total}: {title}…',
-            autopilotCourseraDone: 'Готово: квизов сдано {passed}, не сдано {failed}.',
+            autopilotCourseraDone: 'Готово: заданий сдано {passed}, не сдано {failed}.',
+            autopilotPeerWrite: 'Взаимная проверка: пишу работу «{title}»…', netacadMaterialsModule: 'База материалов — модуль {n} из {total}: {title}…', autopilotPeerUpload: 'Загружаю файл {name}…',
+            autopilotPeerReview: 'Проверяю работу однокурсника {n} из {total}: {title}…',
+            peerNoteManual: 'сдайте вручную: {parts}', peerNoteNotSubmitted: 'работа не отправилась',
+            peerNoteDone: 'сдано, проверено работ: {n}', peerNoteNoPeers: 'сдано, проверено работ: {n}; других работ для проверки пока нет',
             autopilotStuck: 'не нашёл кнопку «{step}»',
             statusAutopilot: 'Автосолвер проходит курс…',
             // content script
@@ -213,15 +224,17 @@ var Naki = (function () {
             statusCourse: 'Coursera course open',
             solve: 'Solve quiz', starting: 'Starting…',
             autoSolve: 'Auto-solve', autoSolveHint: 'Run as soon as a quiz attempt opens',
-            courseContext: 'Use course materials', courseContextHint: 'Course lectures and readings go into the prompt: more accurate, more tokens',
+            courseContext: 'Use course materials', courseContextHint: 'Course texts from the materials base go into the prompt: more accurate, more tokens',
             toastMaterials: 'Loading course materials: {done} of {total}…', toastMaterialsReady: 'Course materials loaded.',
             toastWithMaterials: ' (with course materials)',
             toastMaterialsLoaded: 'Course materials in the base: {n}.',
             materialsTitle: 'Materials base', materialsSummary: 'Courses: {courses} · {size}',
-            materialsEmpty: 'Empty so far: materials are downloaded with the first quiz of a Coursera course.',
+            materialsEmpty: 'Empty so far: materials are collected with the first quiz of a Coursera or NetAcad course.',
+            materialsTtl: 'Refresh after, days', materialsTtlHint: 'Coursera: the course is downloaded again once the base is older. Courses edited by hand are not refreshed',
             materialsOpen: 'Open the base', materialsLoad: 'Load this course',
-            mbHint: 'This is what NSolver gives the model along with Coursera questions. Switched-off materials are not used. Manual edits and notes are kept when a course is downloaded again.',
-            mbCourses: 'Courses', mbNoCourses: 'No courses yet. Open a Coursera course and press "Load this course" in the extension window, or solve a quiz.',
+            mbHint: 'This is what NSolver gives the model along with Coursera and NetAcad questions. Switched-off materials are not used. Manual edits and notes are kept when a course is downloaded again.',
+            mbCourses: 'Courses', mbNoCourses: 'No courses yet. Open a Coursera or NetAcad course and press "Load this course" in the extension window, or solve a quiz.',
+            mbPage: 'Page',
             mbSelect: 'Pick a course on the left.', mbSearch: 'Search titles and text…', mbNothingFound: 'Nothing found.',
             mbAddNote: 'Add your own material', mbNoteTitle: 'Title', mbNoteText: 'Text: notes, definitions, instructor answers…', mbAdd: 'Add',
             mbExport: 'Export JSON', mbImport: 'Import JSON', mbDeleteCourse: 'Delete course',
@@ -259,7 +272,8 @@ var Naki = (function () {
             netacadSkipNothing: 'No course materials found. Open a course module and try again.',
             netacadSkipComponents: 'components', netacadSkipVideos: 'videos',
             autopilotTitle: 'Quiz autopilot', autopilotRun: 'Go through the course', autopilotConfirm: 'Click again: quizzes will be submitted',
-            autopilotHint: 'Every quiz of the course in order, submitted. NetAcad: materials too; exams are left alone',
+            autopilotHint: 'Only the work that counts toward the grade, in order, submitted. NetAcad: materials too; exams are left alone',
+            autopilotPeer: 'Peer-reviewed assignments', autopilotPeerHint: 'Coursera: submit the work (text or a file) and review as many classmates as the course asks',
             autopilotRetakes: 'If a quiz is failed', autopilotRetakes0: 'No retakes', autopilotRetakes2: '2 retakes', autopilotRetakes3: '3 retakes',
             autopilotBusy: 'The autopilot is already running…',
             autopilotStopped: 'The autopilot was stopped.', autopilotStopping: 'The autopilot will stop after the current module.',
@@ -267,9 +281,13 @@ var Naki = (function () {
             autopilotModule: 'Autopilot — module {n} of {total}: {title}…',
             autopilotNotOpened: 'module did not open',
             autopilotDone: 'Done: {modules} modules, {passed} quizzes passed, {failed} failed, {materials} materials completed.',
-            autopilotNoQuizzes: 'The course has no quizzes for the autopilot.',
+            autopilotNoQuizzes: 'The course has no graded work for the autopilot (practice items are skipped).',
             autopilotItem: 'Autopilot — {n} of {total}: {title}…',
-            autopilotCourseraDone: 'Done: {passed} quizzes passed, {failed} failed.',
+            autopilotCourseraDone: 'Done: {passed} assignments passed, {failed} failed.',
+            autopilotPeerWrite: 'Peer review: writing the work "{title}"…', netacadMaterialsModule: 'Materials base — module {n} of {total}: {title}…', autopilotPeerUpload: 'Uploading {name}…',
+            autopilotPeerReview: 'Reviewing classmate {n} of {total}: {title}…',
+            peerNoteManual: 'submit by hand: {parts}', peerNoteNotSubmitted: 'the work was not submitted',
+            peerNoteDone: 'submitted, reviews given: {n}', peerNoteNoPeers: 'submitted, reviews given: {n}; no more work to review yet',
             autopilotStuck: 'could not find the "{step}" button',
             statusAutopilot: 'The autopilot is going through the course…',
             toastBusySolve: 'Quiz Solver is already running…',

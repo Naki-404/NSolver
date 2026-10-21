@@ -53,3 +53,4 @@ body[data-view="page"] { min-height: 100vh; }
 .mb-doc-body { padding: 0 10px 10px; display: flex; flex-direction: column; gap: 6px; }
 .mb-doc-body .mb-actions { justify-content: flex-end; }
 .mb-empty { color: var(--muted); font-size: 12.5px; margin: 8px 0; }
+.mb-badge.page { background: rgba(251, 191, 36, .16); color: #fcd34d; }

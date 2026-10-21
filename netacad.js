@@ -448,7 +448,8 @@
             }
             const settings = state.settings;
             const options = { provider: settings.provider, apiKey: Naki.activeKey(settings), modelId: Naki.activeModel(settings), lang: settings.lang };
-            ui.show('info', tr('toastSolving', { auto: '', n: questions.length, model: options.modelId }));
+            options.contextFor = await courseContext();
+            ui.show('info', tr('toastSolving', { auto: '', n: questions.length, model: options.modelId }) + (options.contextFor ? tr('toastWithMaterials') : ''));
             const started = performance.now();
             const solutions = await ModelProvider.solveQuizQuestions(questions.map(({ apply, ...q }) => q), options);
             console.log('[Naki] NetAcad solutions:', solutions);
@@ -688,6 +689,88 @@
         return !name(courseTitle) || !name(outlineTitle) || name(outlineTitle).startsWith(name(courseTitle).slice(0, 20));
     }
 
+    // ------------------------------------------------------------------ materials base
+    // The texts of every module NSolver opens (and of the module open when solving) go into the materials base
+    // (materials-core.js) as "netacad-<course id>"; the solver gives the model the excerpts closest to the questions,
+    // preferring the module open now. Collecting is cheap: the texts are in the course models already loaded.
+
+    const Materials = Naki.materials;
+    let contextCache = null; // { packageId, id, module, chunks } of the module the solver saw last
+
+    // 0-based module number: "Module 3: …" in the outline (or in the course title), else the outline position.
+    function moduleIndexOf(packageId, title) {
+        const outline = outlineModules();
+        const position = outline.findIndex(module => module.id === packageId);
+        const named = String(position >= 0 ? outline[position].title : title).match(/(?:module|модуль|módulo|modul|modulo)\s*(\d+)/i);
+        return named ? Number(named[1]) - 1 : position >= 0 ? position : null;
+    }
+
+    const courseName = fallback => document.title.split(/\s+[|–—-]\s+/)[0].trim() || fallback;
+
+    // Saves the texts of the loaded module; returns { id, module, docs } of the whole course, or null.
+    async function saveModuleTexts() {
+        const texts = await askMain('texts', 8000);
+        if (!texts?.ready || !texts.courseId || !texts.docs?.length) return null;
+        const id = Materials.courseId(`netacad-${texts.courseId}`);
+        const module = moduleIndexOf(texts.packageId, texts.title);
+        const stored = await Materials.read(id);
+        const previous = stored?.docs || [];
+        const base = (module ?? 99) * 1000;
+        const fresh = texts.docs.map((doc, i) => ({ order: base + i, type: 'page', title: doc.title, module, text: doc.text }));
+        const merged = Materials.mergeManual(fresh, previous.filter(doc => doc.type === 'note' || doc.module === module));
+        const docs = [...previous.filter(doc => doc.type !== 'note' && doc.module !== module), ...merged].sort((a, b) => a.order - b.order);
+        await Materials.save(id, { savedAt: Date.now(), name: stored?.name || courseName(texts.title), site: 'netacad', docs, ...(stored?.edited ? { edited: true } : {}) });
+        contextCache = null;
+        return { id, module, docs, packageId: texts.packageId };
+    }
+
+    // contextFor(questions) for ModelProvider, or null when the course materials are off or unavailable.
+    async function courseContext() {
+        if (!state.settings.courseContext) return null;
+        try {
+            const status = await askMain('status', 3000);
+            if (!status?.ready) return null;
+            if (!contextCache || contextCache.packageId !== status.packageId) {
+                const saved = await saveModuleTexts();
+                if (!saved) return null;
+                contextCache = { packageId: saved.packageId, id: saved.id, module: saved.module, chunks: Materials.chunkDocs(saved.docs) };
+            }
+            const { chunks, module } = contextCache;
+            return chunks.length ? questions => Materials.excerpts(chunks, questions, module) : null;
+        } catch (error) {
+            console.warn('[Naki] NetAcad course materials unavailable:', error.message);
+            return null;
+        }
+    }
+
+    // "Load this course" in the panel: opens every module of the outline and saves its texts.
+    async function loadMaterialsNow() {
+        if (state.skipping) {
+            ui.show('info', tr('toastBusySkip'), { duration: 2500 });
+            return;
+        }
+        state.skipping = true;
+        try {
+            const current = await askMain('status', 3000);
+            if (!current?.ready) {
+                ui.show('error', tr('autopilotNoCourse'), { duration: 10000 });
+                return;
+            }
+            const modules = outlineModules();
+            let saved = modules.length ? null : await saveModuleTexts();
+            for (const [i, module] of modules.entries()) {
+                ui.show('info', tr('netacadMaterialsModule', { n: i + 1, total: modules.length, title: module.title }));
+                if (await openModule(module)) saved = await saveModuleTexts() || saved;
+            }
+            const count = saved?.docs.length || 0;
+            ui.show(count ? 'success' : 'error', tr('toastMaterialsLoaded', { n: count }), { duration: 8000 });
+        } catch (error) {
+            ui.show('error', tr('toastSkipError', { error: error.message }));
+        } finally {
+            state.skipping = false;
+        }
+    }
+
     async function skipMaterials() {
         if (state.skipping) {
             ui.show('info', tr('toastBusySkip'), { duration: 2500 });
@@ -706,6 +789,7 @@
             if (!outlineModules().length) {
                 // A course frame without the player outline: this module only.
                 ui.show('info', tr('netacadSkipModule', { n: 1, total: 1, title: current.title }));
+                await saveModuleTexts().catch(() => null);
                 const result = await askMain('complete', 120000);
                 componentsDone += result?.done || 0;
                 modulesDone++;
@@ -717,6 +801,7 @@
                     failed.push(module.title);
                     continue;
                 }
+                await saveModuleTexts().catch(() => null);
                 if (status.left) {
                     const result = await askMain('complete', 120000);
                     componentsDone += result?.done || 0;
@@ -737,9 +822,9 @@
     }
 
     // ------------------------------------------------------------------ quiz autopilot
-    // Module by module: mark the materials complete, then pass every "Check Your Understanding" and module quiz
-    // (netacad-main.js answers from the course data, retakes failed attempts as set in the panel).
-    // Checkpoint / final exams are never opened (outlineModules() lists modules only).
+    // Module by module: mark the materials complete, then pass every module quiz (netacad-main.js answers from the
+    // course data, retakes failed attempts as set in the panel). "Check Your Understanding" activities are practice
+    // and are left alone. Checkpoint / final exams are never opened (outlineModules() lists modules only).
 
     async function autopilot() {
         if (state.autopilot) {
@@ -768,6 +853,7 @@
                     summary.failed.push(`${title}: ${tr('autopilotNotOpened')}`);
                     continue;
                 }
+                await saveModuleTexts().catch(() => null);
                 const materials = await askMain('complete', 120000);
                 summary.materials += materials?.done || 0;
                 const quizzes = await askMain('quizzes', 30 * 60 * 1000, { retakes });
@@ -882,6 +968,7 @@
         if (type === Naki.MSG.SOLVE) solve();
         else if (type === Naki.MSG.SKIP) skipMaterials();
         else if (type === Naki.MSG.AUTOPILOT) autopilot();
+        else if (type === Naki.MSG.MATERIALS_LOAD) loadMaterialsNow();
     }
 
     // ------------------------------------------------------------------ messaging & settings
@@ -898,6 +985,7 @@
                 case Naki.MSG.SOLVE:
                 case Naki.MSG.SKIP:
                 case Naki.MSG.AUTOPILOT:
+                case Naki.MSG.MATERIALS_LOAD:
                     handle(message.type);
                     sendResponse({ ok: true });
                     break;
@@ -909,7 +997,9 @@
     }
 
     chrome.storage.onChanged.addListener((changes, area) => {
-        if (area === 'local' && alive()) Naki.loadSettings().then(applySettings);
+        if (area !== 'local' || !alive()) return;
+        if (Object.keys(changes).some(key => key.startsWith(Materials.KEY))) contextCache = null; // edited in the materials base
+        Naki.loadSettings().then(applySettings);
     });
     Naki.loadSettings().then(applySettings);
 

@@ -71,6 +71,10 @@
                         <option value="3" data-i18n="autopilotRetakes3"></option>
                     </select>
                 </div>
+                <div class="row" id="autopilotPeerRow">
+                    <label class="label-text" for="autopilotPeer"><span data-i18n="autopilotPeer"></span><small data-i18n="autopilotPeerHint"></small></label>
+                    <label class="switch"><input type="checkbox" id="autopilotPeer"><span class="track"></span></label>
+                </div>
             </section>
 
             <section class="card" id="netacadCard" hidden>
@@ -114,6 +118,10 @@
                 <div class="materials-actions">
                     <button class="btn secondary small" id="materialsOpen" type="button"><span data-i18n="materialsOpen"></span></button>
                     <button class="btn secondary small" id="materialsLoad" type="button" hidden><span data-i18n="materialsLoad"></span></button>
+                </div>
+                <div class="row">
+                    <label class="label-text" for="materialsTtlDays"><span data-i18n="materialsTtl"></span><small data-i18n="materialsTtlHint"></small></label>
+                    <input type="number" id="materialsTtlDays" class="compact-number" min="1" max="365" step="1">
                 </div>
             </section>
 
@@ -221,9 +229,9 @@
     // Coursera and Cisco NetAcad share the solve button; the rest of the main page depends on the site.
     function showSite(site) {
         const netacad = site === 'netacad';
-        $('materialsLoad').hidden = site !== 'coursera';
+        $('materialsLoad').hidden = !site;
         $('autoSolveRow').hidden = netacad;
-        $('courseContextRow').hidden = netacad;
+        $('autopilotPeerRow').hidden = netacad;
         $('skipDiscussionsRow').hidden = netacad;
         $('netacadSkipHint').hidden = !netacad;
         $('netacadCard').hidden = !netacad;
@@ -304,6 +312,12 @@
         runAction($('autopilot'), Naki.MSG.AUTOPILOT);
     });
     $('autopilotRetakes').addEventListener('change', () => Naki.saveSettings({ autopilotRetakes: Number($('autopilotRetakes').value) }));
+    $('autopilotPeer').addEventListener('change', () => Naki.saveSettings({ autopilotPeer: $('autopilotPeer').checked }));
+    $('materialsTtlDays').addEventListener('change', () => {
+        const days = Math.round(Number($('materialsTtlDays').value));
+        if (days >= 1 && days <= 365) Naki.saveSettings({ materialsTtlDays: days });
+        else $('materialsTtlDays').value = String(settings.materialsTtlDays);
+    });
 
     // ------------------------------------------------------------------ settings: provider, model, key
 
@@ -354,6 +368,8 @@
         $('skipDiscussions').checked = settings.skipDiscussions;
         $('netacadButton').checked = settings.netacadButton;
         $('autopilotRetakes').value = String(settings.autopilotRetakes);
+        $('autopilotPeer').checked = settings.autopilotPeer;
+        if (document.activeElement !== $('materialsTtlDays')) $('materialsTtlDays').value = String(settings.materialsTtlDays);
         renderModelSelect();
         renderKeyMessage();
     }

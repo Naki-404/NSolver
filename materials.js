@@ -1,5 +1,5 @@
-// Materials base: the course materials NSolver gives the model with Coursera questions, viewable and editable by hand.
-// Records live in chrome.storage.local under "nakiMaterials:<course slug>" = { savedAt, name, docs, edited }.
+// Materials base: the course materials NSolver gives the model with Coursera and NetAcad questions, viewable and editable by hand.
+// Records live in chrome.storage.local under "nakiMaterials:<course id>" = { savedAt, name, site, docs, edited } (materials-core.js).
 // NSolver, made by Naki — https://github.com/Naki-404/NSolver
 (function () {
     const PREFIX = 'nakiMaterials:';
@@ -32,7 +32,7 @@
         return `${Math.max(1, Math.round(bytes / 1024))} KB`;
     }
     const formatDate = time => new Date(time).toLocaleString(lang === 'en' ? 'en-GB' : 'ru-RU', { dateStyle: 'medium', timeStyle: 'short' });
-    const typeLabel = type => tr({ lecture: 'mbLecture', supplement: 'mbReading', note: 'mbNote' }[type] || 'mbNote');
+    const typeLabel = type => tr({ lecture: 'mbLecture', supplement: 'mbReading', page: 'mbPage', note: 'mbNote' }[type] || 'mbNote');
 
     function notice(text, kind = 'success') {
         $('notice').textContent = text;
@@ -230,7 +230,7 @@
             const docs = data.docs
                 .filter(doc => doc && typeof doc.text === 'string' && doc.text.trim())
                 .map((doc, i) => ({
-                    type: ['lecture', 'supplement', 'note'].includes(doc.type) ? doc.type : 'note',
+                    type: ['lecture', 'supplement', 'page', 'note'].includes(doc.type) ? doc.type : 'note',
                     title: String(doc.title || `${i + 1}`).slice(0, 200),
                     module: Number.isInteger(doc.module) ? doc.module : null,
                     order: Number.isFinite(doc.order) ? doc.order : i,
@@ -238,7 +238,7 @@
                     ...(doc.disabled ? { disabled: true } : {}),
                     ...(doc.edited ? { edited: true } : {})
                 }));
-            await saveCourse(data.slug, { savedAt: Number(data.savedAt) || Date.now(), name: String(data.name || data.slug), docs });
+            await saveCourse(data.slug, { savedAt: Number(data.savedAt) || Date.now(), name: String(data.name || data.slug), ...(data.site === 'netacad' ? { site: 'netacad' } : {}), docs });
             selected = data.slug;
             openDoc = null;
             notice(tr('mbImported', { name: data.name || data.slug }));

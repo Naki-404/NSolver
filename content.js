@@ -115,7 +115,7 @@
     }
 
     // "Select all that apply", "Choose two", "Выберите все"… in the prompt.
-    const MULTIPLE_PROMPT = /select all that apply|all that apply|choose (?:all|two|three|four|2|3|4)|select (?:two|three|four|2|3|4)|pick (?:two|three|2|3)|выберите (?:все|два|три|четыре|несколько|2|3|4)|отметьте все|укажите все/i;
+    const MULTIPLE_PROMPT = /select all that apply|all that apply|choose (?:all|two|three|four|2|3|4)\b|select (?:two|three|four|2|3|4)\b|pick (?:two|three|2|3)\b|выберите (?:все|два|три|четыре|несколько|2|3|4)|отметьте все|укажите все/i;
     const MULTIPLE_TYPE = /checkbox|multiselect|multipleselect|multipleresponse|multianswer|multipleanswer/;
 
     // Several correct options: checkbox question type, a multi-select flag in the schema, or the prompt says so.
@@ -311,15 +311,10 @@
 
     // ------------------------------------------------------------------ course materials for the solver
     // Many quizzes check what this very course teaches. Lecture transcripts and readings are downloaded once per course
-    // (kept in chrome.storage.local for two weeks), cut into chunks, and every request to the model gets the chunks
-    // closest to its questions (BM25 over words), preferring the quiz's own module.
+    // (kept in the materials base for the days set in Settings), cut into chunks, and every request to the model gets
+    // the chunks closest to its questions (materials-core.js), preferring the quiz's own module.
 
-    const MATERIALS_KEY = 'nakiMaterials:';              // + course slug → { savedAt, docs: [{ order, type, title, module, text }] }
-    const MATERIALS_INDEX_KEY = 'nakiMaterialsIndex';    // most recently used slugs; older courses are evicted
-    const MATERIALS_TTL_MS = 14 * 24 * 60 * 60 * 1000;
-    const MATERIALS_MAX_COURSES = 6;
-    const CONTEXT_CHARS = 24000;                         // course excerpts per request (~6k tokens)
-    const CHUNK_CHARS = 1200;
+    const Materials = Naki.materials;
     const materialsCache = new Map();                    // slug → docs, for this page
 
     async function courseMaterialsFor(slug) {
@@ -338,28 +333,13 @@
         return response.ok ? response.text() : '';
     }
 
+    // Keep paragraphs, headings and list items apart once the tags are gone.
+    const blockText = html => htmlToText(String(html || '').replace(/<\/(p|div|li|h[1-6]|tr|td|th|blockquote|pre)>|<br\s*\/?>/gi, '$& '));
+
     async function readingText(courseId, itemId) {
         const data = await getJson(`${API}/onDemandSupplements.v1/${courseId}~${itemId}?includes=asset&fields=openCourseAssets.v1(typeName),openCourseAssets.v1(definition)`);
         const definition = data?.linked?.['openCourseAssets.v1']?.[0]?.definition || {};
-        const html = definition.renderableHtmlWithMetadata?.renderableHtml || definition.value || '';
-        // Keep paragraphs, headings and list items apart once the tags are gone.
-        return htmlToText(html.replace(/<\/(p|div|li|h[1-6]|tr|td|th|blockquote|pre)>|<br\s*\/?>/gi, '$& '));
-    }
-
-    // Courses edited by hand in the materials base (materials.html) are kept: never evicted, never refreshed by age.
-    async function rememberCourse(slug) {
-        const { [MATERIALS_INDEX_KEY]: index = [] } = await chrome.storage.local.get(MATERIALS_INDEX_KEY);
-        const next = [slug, ...index.filter(other => other !== slug)];
-        const overflow = next.slice(MATERIALS_MAX_COURSES);
-        if (!overflow.length) {
-            await chrome.storage.local.set({ [MATERIALS_INDEX_KEY]: next });
-            return;
-        }
-        const stored = await chrome.storage.local.get(overflow.map(other => MATERIALS_KEY + other));
-        const kept = overflow.filter(other => stored[MATERIALS_KEY + other]?.edited);
-        const evicted = overflow.filter(other => !kept.includes(other));
-        await chrome.storage.local.set({ [MATERIALS_INDEX_KEY]: [...next.slice(0, MATERIALS_MAX_COURSES), ...kept] });
-        if (evicted.length) await chrome.storage.local.remove(evicted.map(other => MATERIALS_KEY + other));
+        return blockText(definition.renderableHtmlWithMetadata?.renderableHtml || definition.value || '');
     }
 
     async function fetchCourseName(slug) {
@@ -367,28 +347,14 @@
         return data?.elements?.[0]?.name || slug;
     }
 
-    // A fresh download keeps what was done by hand: notes, edited texts and switched-off materials.
-    function mergeManual(downloaded, previous) {
-        if (!previous?.length) return downloaded;
-        const byKey = new Map(previous.filter(doc => doc.type !== 'note').map(doc => [`${doc.type}|${doc.title}`, doc]));
-        const docs = downloaded.map(doc => {
-            const old = byKey.get(`${doc.type}|${doc.title}`);
-            if (!old) return doc;
-            return { ...doc, ...(old.edited ? { text: old.text, edited: true } : {}), ...(old.disabled ? { disabled: true } : {}) };
-        });
-        return [...docs, ...previous.filter(doc => doc.type === 'note')];
-    }
-
     // Lecture transcripts and readings of the course (+ notes added by hand), from the base or downloaded.
     // force: download again even when the base has the course (manual edits are kept).
     async function loadCourseDocs(slug, onProgress, { force = false } = {}) {
         if (!force && materialsCache.has(slug)) return materialsCache.get(slug);
-        const key = MATERIALS_KEY + slug;
-        const stored = (await chrome.storage.local.get(key))[key];
-        const fresh = stored && (stored.edited || Date.now() - stored.savedAt < MATERIALS_TTL_MS);
-        if (!force && fresh && stored.docs?.length) {
+        const stored = await Materials.read(slug);
+        if (!force && Materials.isFresh(stored, state.settings.materialsTtlDays) && stored.docs?.length) {
             materialsCache.set(slug, stored.docs);
-            rememberCourse(slug).catch(() => { });
+            Materials.remember(slug).catch(() => { });
             return stored.docs;
         }
         const materials = await courseMaterialsFor(slug);
@@ -405,79 +371,14 @@
             if (text.length > 40) downloaded.push({ order, type, title: item.name, module, text });
         }, () => onProgress && onProgress(++done, sources.length));
         downloaded.sort((a, b) => a.order - b.order);
-        const docs = mergeManual(downloaded, stored?.docs);
+        const docs = Materials.mergeManual(downloaded, stored?.docs);
         if (docs.length) {
             const name = stored?.name && stored.name !== slug ? stored.name : await fetchCourseName(slug);
-            await chrome.storage.local.set({ [key]: { savedAt: Date.now(), name, docs, ...(stored?.edited ? { edited: true } : {}) } });
-            await rememberCourse(slug);
+            await Materials.save(slug, { savedAt: Date.now(), name, site: 'coursera', docs, ...(stored?.edited ? { edited: true } : {}) });
         }
         materialsCache.set(slug, docs);
         console.log(`[Naki] Course materials: ${downloaded.length} of ${sources.length} lectures/readings, ${docs.reduce((sum, doc) => sum + doc.text.length, 0)} chars`);
         return docs;
-    }
-
-    const STOPWORDS = new Set(('the and for that this with from what which when where who whom whose why how are was were been being have has had ' +
-        'does did not but can could should would will shall may might must into onto than then them they their there these those your you our its ' +
-        'his her him she also any all each other such only own same very just about above below after before between both during through under over ' +
-        'again further once here more most some few nor too out off per via use used using following true false best answer question questions select ' +
-        'choose correct incorrect statement statements option options describe describes which что как это для или его она они при над под все').split(' '));
-    const wordsOf = text => (String(text).toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) || []).filter(word => !STOPWORDS.has(word));
-
-    // Overlapping chunks, cut at word boundaries.
-    function chunkDocs(docs) {
-        const chunks = [];
-        for (const doc of docs.filter(item => !item.disabled && item.text)) {
-            let start = 0;
-            while (start < doc.text.length) {
-                let end = Math.min(doc.text.length, start + CHUNK_CHARS);
-                if (end < doc.text.length) end = doc.text.lastIndexOf(' ', end) > start + CHUNK_CHARS / 2 ? doc.text.lastIndexOf(' ', end) : end;
-                const text = doc.text.slice(start, end).trim();
-                chunks.push({ doc, start, text, words: wordsOf(text) });
-                if (end >= doc.text.length) break;
-                start = Math.max(end - 200, start + 1);
-            }
-        }
-        return chunks;
-    }
-
-    // BM25 between the questions and every chunk; the quiz's module (and the one before it) is preferred.
-    function courseExcerpts(chunks, questions, quizModule) {
-        const query = new Set(questions.flatMap(q => wordsOf(`${q.question} ${(q.options || []).join(' ')}`)));
-        if (!query.size || !chunks.length) return '';
-        const df = new Map();
-        for (const chunk of chunks) for (const word of new Set(chunk.words)) if (query.has(word)) df.set(word, (df.get(word) || 0) + 1);
-        const total = chunks.length;
-        const averageLength = chunks.reduce((sum, chunk) => sum + chunk.words.length, 0) / total || 1;
-        const scored = [];
-        for (const chunk of chunks) {
-            const tf = new Map();
-            for (const word of chunk.words) if (query.has(word)) tf.set(word, (tf.get(word) || 0) + 1);
-            let score = 0;
-            for (const [word, count] of tf) {
-                const idf = Math.log(1 + (total - df.get(word) + 0.5) / (df.get(word) + 0.5));
-                score += idf * (count * 2.2) / (count + 1.2 * (0.25 + 0.75 * chunk.words.length / averageLength));
-            }
-            if (!score) continue;
-            const module = chunk.doc.module;
-            if (quizModule !== null && module !== null) {
-                if (module === quizModule) score *= 1.5;
-                else if (module === quizModule - 1) score *= 1.15;
-                else if (module > quizModule) score *= 0.7;
-            }
-            scored.push({ chunk, score });
-        }
-        scored.sort((a, b) => b.score - a.score);
-        const picked = [];
-        let used = 0;
-        for (const { chunk } of scored) {
-            if (used + chunk.text.length > CONTEXT_CHARS) continue;
-            picked.push(chunk);
-            used += chunk.text.length + 60;
-            if (used > CONTEXT_CHARS - 400) break;
-        }
-        picked.sort((a, b) => a.doc.order - b.doc.order || a.start - b.start);
-        const label = type => ({ lecture: 'Lecture', supplement: 'Reading', note: 'Note' }[type] || 'Material');
-        return picked.map(chunk => `[${label(chunk.doc.type)}: ${chunk.doc.title}] ${chunk.text}`).join('\n\n');
     }
 
     // "Load this course" in the panel: download (again) into the materials base, keeping manual edits.
@@ -496,6 +397,17 @@
         }
     }
 
+    // Excerpts for any text questions ([{ question, options }]), with the module of the item open now preferred.
+    async function courseExcerptsFor(questions, progressToast, limit) {
+        const slug = courseSlug();
+        if (!slug) return '';
+        const docs = await loadCourseDocs(slug, (done, total) => progressToast?.update(tr('toastMaterials', { done, total }), 'info', 0));
+        if (!docs.length) return '';
+        const path = location.pathname.split('/');
+        const current = orderedCourseItems(await courseMaterialsFor(slug)).find(entry => path.includes(entry.item.id));
+        return Materials.excerpts(Materials.chunkDocs(docs), questions, current ? current.module : null, limit);
+    }
+
     // contextFor(questions) for ModelProvider, or null when the course materials are off or unavailable.
     async function courseContext(progressToast) {
         if (!state.settings.courseContext) return null;
@@ -504,11 +416,11 @@
         try {
             const docs = await loadCourseDocs(slug, (done, total) => progressToast?.update(tr('toastMaterials', { done, total }), 'info', 0));
             if (!docs.length) return null;
-            const chunks = chunkDocs(docs);
+            const chunks = Materials.chunkDocs(docs);
             const path = location.pathname.split('/');
             const current = orderedCourseItems(await courseMaterialsFor(slug)).find(entry => path.includes(entry.item.id));
             const quizModule = current ? current.module : null;
-            return questions => courseExcerpts(chunks, questions, quizModule);
+            return questions => Materials.excerpts(chunks, questions, quizModule);
         } catch (error) {
             console.warn('[Naki] Course materials unavailable:', error.message);
             return null;
@@ -595,7 +507,8 @@
         return getJson(`${API}/onDemandCourseMaterials.v2/?q=slug&slug=${encodeURIComponent(slug)}` +
             '&includes=modules,lessons,passableItemGroups,passableItemGroupChoices,passableLessonElements,items,tracks,gradePolicy,gradingParameters' +
             '&fields=moduleIds,onDemandCourseMaterialModules.v1(name,slug,lessonIds),onDemandCourseMaterialLessons.v1(name,slug,itemIds),' +
-            'onDemandCourseMaterialItems.v2(name,slug,timeCommitment,contentSummary,isLocked,lockableByItem,itemLockedReasonCode,trackId,lockedStatus,itemLockSummary)' +
+            'onDemandCourseMaterialItems.v2(name,slug,timeCommitment,contentSummary,isLocked,lockableByItem,itemLockedReasonCode,trackId,lockedStatus,itemLockSummary),' +
+            'onDemandCourseMaterialPassableLessonElements.v1(gradingWeight,isRequiredForPassing)' +
             '&showLockedItems=true');
     }
 
@@ -801,9 +714,11 @@
     }
 
     // ------------------------------------------------------------------ quiz autopilot
-    // Goes through every quiz of the course (graded "exam" and practice "quiz" items) in course order: opens it,
-    // starts an attempt, solves it, accepts the Honor Code, submits, reads the grade and retakes a failed quiz as set
-    // in the panel. Coursera loads a new page per item, so the run lives in chrome.storage.local and resumes on load.
+    // Goes through the graded work of the course (items with a weight in the grade) in course order. A quiz is opened,
+    // started, solved, the Honor Code accepted, submitted, the grade read and a failed quiz retaken as set in the
+    // panel; a peer-reviewed assignment is written, submitted and the classmates reviewed (see below). Practice items
+    // do not count toward the course and are left alone. Coursera loads a new page per item, so the run lives in
+    // chrome.storage.local and resumes on load.
 
     const AUTOPILOT_KEY = 'nakiAutopilot';
     // "exam" / "quiz": older courses. "staffGraded" (Graded Assignment, module challenge, practice quiz) and
@@ -873,12 +788,29 @@
         return ordered.length ? ordered : items.map(item => ({ item, module: null }));
     }
 
-    // Quizzes in course order.
-    function courseQuizzes(materials) {
+    // Ids of the items that count toward the course grade ("item~<id>" elements with a grading weight), or null when
+    // the course materials came without grading weights.
+    function gradedItemIds(materials) {
+        const linked = materials?.linked || {};
+        const elements = Object.entries(linked).find(([key]) => /^onDemandCourseMaterialPassableLessonElements\.v\d+$/.test(key))?.[1];
+        if (!elements?.some(element => 'gradingWeight' in element || 'isRequiredForPassing' in element)) return null;
+        return new Set(elements.filter(element => element.gradingWeight > 0 || element.isRequiredForPassing)
+            .map(element => String(element.id).replace(/^item~/, '')));
+    }
+
+    // Graded quizzes (and, when switched on, graded peer-reviewed assignments) in course order.
+    function courseQuizzes(materials, { peer = false } = {}) {
+        const graded = gradedItemIds(materials);
         return orderedCourseItems(materials).map(entry => entry.item)
-            // Rubric-graded items are written work reviewed by people, not quizzes.
-            .filter(item => QUIZ_TYPES.includes(item.contentSummary?.typeName) && !item.isLocked &&
-                !(item.contentSummary?.definition?.assignmentFeatures || []).includes('ASSIGNMENT_RUBRICS'))
+            .filter(item => {
+                const type = item.contentSummary?.typeName;
+                if (item.isLocked) return false;
+                // Without grading weights: practice quizzes ("quiz", "ungradedAssignment") are known to be ungraded.
+                if (graded ? !graded.has(item.id) : ['quiz', 'ungradedAssignment'].includes(type)) return false;
+                if (PEER_TYPES.includes(type)) return peer;
+                // Rubric-graded items are written work reviewed by people, not quizzes.
+                return QUIZ_TYPES.includes(type) && !(item.contentSummary?.definition?.assignmentFeatures || []).includes('ASSIGNMENT_RUBRICS');
+            })
             .map(item => ({ id: item.id, slug: item.slug, type: item.contentSummary.typeName, name: item.name }));
     }
 
@@ -916,6 +848,7 @@
         if (result) run.results.push(result);
         run.index++;
         run.attempt = 0;
+        delete run.peer;
         run.phase = 'open';
         run.phaseAt = Date.now();
         await saveRun(run);
@@ -932,7 +865,8 @@
         console.log('[Naki] Coursera autopilot finished:', run.results);
     }
 
-    async function startAutopilot() {
+    // only: the id of one item to do (the peer-reviewed assignment open now) instead of the whole course.
+    async function startAutopilot({ only = null } = {}) {
         const running = await loadRun();
         if (running) {
             // A second press stops the run.
@@ -950,19 +884,24 @@
             toast(tr('toastNoCourse'), 'error');
             return;
         }
-        let materials = state.courseMaterials;
-        if (!materials) materials = await fetchCourseMaterials(slug).catch(() => null);
-        const items = materials ? courseQuizzes(materials) : [];
+        // A fresh copy: the one the page loaded may come without grading weights.
+        const materials = await fetchCourseMaterials(slug).catch(() => state.courseMaterials);
+        const items = !materials ? [] : only
+            ? orderedCourseItems(materials).map(entry => entry.item).filter(item => item.id === only)
+                .map(item => ({ id: item.id, slug: item.slug, type: item.contentSummary?.typeName, name: item.name }))
+            : courseQuizzes(materials, { peer: state.settings.autopilotPeer });
         if (!items.length) {
             toast(tr('autopilotNoQuizzes'), 'info', 8000);
             return;
         }
+        const userId = state.userId || readUserId() || await fetchUserId().catch(() => null);
+        const courseId = materials.linked?.['onDemandGradingParameters.v1']?.[0]?.id || await fetchCourseId(slug).catch(() => null);
         if (state.settings.courseContext) {
             const loading = toast(tr('toastMaterials', { done: 0, total: '…' }), 'info', 0);
             await loadCourseDocs(slug, (done, total) => loading.update(tr('toastMaterials', { done, total }), 'info', 0)).catch(error => console.warn('[Naki] Course materials unavailable:', error.message));
             loading.update(tr('toastMaterialsReady'), 'success', 3000);
         }
-        const run = { id: String(Date.now()), slug, items, index: 0, attempt: 0, phase: 'open', phaseAt: Date.now(), retakes: state.settings.autopilotRetakes, results: [] };
+        const run = { id: String(Date.now()), slug, userId, courseId, items, index: 0, attempt: 0, phase: 'open', phaseAt: Date.now(), retakes: state.settings.autopilotRetakes, results: [] };
         await saveRun(run);
         console.log('[Naki] Coursera autopilot:', items);
         runLoop();
@@ -991,12 +930,13 @@
                 }
                 return;
             }
-            if (Date.now() - run.phaseAt > STUCK_MS && run.phase !== 'submitted') {
+            if (Date.now() - run.phaseAt > (PEER_TYPES.includes(item.type) ? PEER_STUCK_MS : STUCK_MS) && run.phase !== 'submitted') {
                 console.warn('[Naki] Autopilot stuck on', item.name, run.phase);
                 await nextItem(run, { name: item.name, pass: false, percent: null, note: tr('autopilotStuck', { step: run.phase }) });
                 return;
             }
-            if (isAttemptPage()) await attemptStep(run, item);
+            if (PEER_TYPES.includes(item.type)) await peerStep(run, item);
+            else if (isAttemptPage()) await attemptStep(run, item);
             else await coverStep(run, item);
         } catch (error) {
             console.error('[Naki] Autopilot step failed:', error);
@@ -1093,6 +1033,379 @@
         autopilotStep();
     }
 
+
+    // ------------------------------------------------------------------ peer-reviewed assignments
+    // My submission: the model writes the work from the instructions, the parts' prompts and the course materials;
+    // text goes into the text fields, a file part gets a generated PDF (DOCX / TXT when the part asks for them), then
+    // Submit and the confirmation dialog (checkbox, legal name). Peers to review: as many classmates as the course
+    // requires, each graded by the model strictly by the rubric from what the submission actually contains (text and
+    // the text of attached PDF / DOCX / PPTX files).
+
+    const PEER_TYPES = ['peer', 'phasedPeer', 'gradedPeer', 'closedPeer'];
+    const PEER_STUCK_MS = 4 * 60 * 1000;
+
+    const peerUrl = (run, item, tail = '') => `https://www.coursera.org/learn/${run.slug}/peer/${item.id}/${item.slug}${tail}`;
+    const peerRoute = () => location.pathname.match(/\/peer\/[^/]+\/[^/]+\/(submit|give-feedback|review\/([^/]+))\/?$/) || [];
+    const cmlText = content => {
+        const definition = content?.definition || {};
+        return blockText(definition.renderableHtmlWithMetadata?.renderableHtml || definition.value || '').trim();
+    };
+    const visibleDialog = () => [...document.querySelectorAll('[role="dialog"], [aria-modal="true"], .rc-Modal')]
+        .find(dialog => isShown(dialog) && (dialog.innerText || '').trim());
+
+    async function peerAssignment(run, item) {
+        const data = await getJson(`${API}/onDemandPeerAssignmentInstructions.v1/?q=latest&userId=${run.userId}&courseId=${run.courseId}&itemId=${item.id}` +
+            '&includes=gradingMetadata,reviewSchemas,submissionSchemas&fields=instructions,' +
+            'onDemandPeerAssignmentGradingMetadata.v1(requiredAuthoredReviewCount,isMentorGraded,assignmentDetails),' +
+            'onDemandPeerReviewSchemas.v1(reviewSchema),onDemandPeerSubmissionSchemas.v1(submissionSchema)');
+        const instructions = data?.elements?.[0]?.instructions || {};
+        const linked = data?.linked || {};
+        return {
+            instructions: [cmlText(instructions.introduction), ...(instructions.sections || []).map(section => `${section.title}: ${cmlText(section.content)}`)].filter(Boolean).join('\n\n'),
+            submissionParts: linked['onDemandPeerSubmissionSchemas.v1']?.[0]?.submissionSchema?.parts || [],
+            reviewParts: linked['onDemandPeerReviewSchemas.v1']?.[0]?.reviewSchema?.parts || [],
+            required: linked['onDemandPeerAssignmentGradingMetadata.v1']?.[0]?.requiredAuthoredReviewCount ?? null
+        };
+    }
+
+    async function peerSubmitted(run, item) {
+        const data = await getJson(`${API}/onDemandPeerAssignmentPermissions.v1/${run.userId}~${run.courseId}~${item.id}/` +
+            '?fields=reviewPeers,onDemandPeerSubmissionProgresses.v1(latestSubmissionSummary,latestDraftSummary,isLatestSubmissionDeleted)&includes=submissionProgress');
+        const progress = data?.linked?.['onDemandPeerSubmissionProgresses.v1']?.[0];
+        return !!progress?.latestSubmissionSummary && !progress.isLatestSubmissionDeleted;
+    }
+
+    function partKind(part) {
+        const type = part.details?.typeName || '';
+        const definition = part.details?.definition || {};
+        if (Array.isArray(definition.options)) return 'options';
+        if (/yesNo/i.test(type)) return 'yesNo';
+        if (/file/i.test(type)) return 'file';
+        if (/url/i.test(type)) return 'url';
+        if (/image/i.test(type)) return 'image';
+        return 'text'; // plainText, richText, multiLineInput, singleLineInput…
+    }
+
+    const optionsOf = part => partKind(part) === 'yesNo'
+        ? [{ text: 'Yes', points: part.details?.definition?.yesPoints }, { text: 'No', points: part.details?.definition?.noPoints }]
+        : (part.details?.definition?.options || []).map(option => ({ id: option.id, text: cmlText(option.display) || String(option.display?.definition?.value || ''), points: option.points }));
+
+    // Controls of a submission / review part: the ones labelled by the part id, else those in the nearest container
+    // of an element whose id mentions the part.
+    function partControls(partId, selector) {
+        const usable = el => isShown(el) && !el.readOnly && el.getAttribute('aria-hidden') !== 'true' && !/~comment$/.test(el.id);
+        const mentions = el => [el.id, el.name, el.getAttribute('aria-labelledby'), el.getAttribute('aria-describedby')].some(value => value && value.includes(partId));
+        const direct = [...document.querySelectorAll(selector)].filter(el => usable(el) && mentions(el));
+        if (direct.length) return direct;
+        let node = [...document.querySelectorAll('[id]')].find(el => el.id.includes(partId));
+        for (let depth = 0; node && depth < 8; depth++, node = node.parentElement) {
+            const found = [...node.querySelectorAll(selector)].filter(usable);
+            if (found.length) return found;
+        }
+        return [];
+    }
+
+    function chooseOption(partId, options, index) {
+        const radios = partControls(partId, 'input[type="radio"]');
+        if (!radios.length || !options[index]) return false;
+        const labelText = radio => normalize((radio.closest('label') || radio.labels?.[0] || radio.parentElement)?.textContent || '');
+        const wanted = normalize(options[index].text).slice(0, 60);
+        const radio = (wanted && radios.find(r => labelText(r).includes(wanted))) || radios[index];
+        if (!radio) return false;
+        if (!radio.checked) (radio.labels?.[0] || radio).click();
+        return true;
+    }
+
+    function fillText(partId, text) {
+        const field = partControls(partId, 'textarea, [contenteditable="true"], input[type="text"], input:not([type])')[0];
+        if (!field) return false;
+        if (field.isContentEditable) setEditableText(field, text);
+        else setNativeValue(field, text);
+        return true;
+    }
+
+    async function generateJson(prompt) {
+        const settings = state.settings;
+        const { text } = await ModelProvider.generateContent({ provider: settings.provider, apiKey: Naki.activeKey(settings), modelId: Naki.activeModel(settings), lang: settings.lang, prompt });
+        return ModelProvider.parseJsonResponse(text, settings.lang);
+    }
+
+    const materialsFor = async (text, limit) => state.settings.courseContext
+        ? courseExcerptsFor([{ question: text }], null, limit).catch(() => '') : '';
+
+    async function writeSubmission(item, assignment) {
+        const parts = assignment.submissionParts.map(part => ({
+            id: part.id, kind: partKind(part), prompt: cmlText(part.prompt),
+            ...(['options', 'yesNo'].includes(partKind(part)) ? { options: optionsOf(part).map((option, i) => ({ i, text: option.text })) } : {})
+        }));
+        const context = await materialsFor(`${item.name} ${assignment.instructions} ${parts.map(part => part.prompt).join(' ')}`, 16000);
+        const prompt = `You are a diligent student completing the peer-reviewed assignment "${item.name}" of an online course.
+Write the student's submission: complete, specific and well organised work that meets every requirement and review
+criterion below. Use the language of the assignment. Write it as the student's own work: no mention of AI, no
+placeholders such as [Your Name]. When the task asks for screenshots, files or results of hands-on work that cannot be
+attached as text, describe the steps taken and what they show, clearly and concretely, without inventing exact
+evidence such as hashes, timestamps or file names.
+
+Assignment instructions and review criteria:
+<<<
+${assignment.instructions.slice(0, 12000)}
+>>>
+${context ? `
+Course material excerpts (use them; the reviewers check against this course):
+<<<
+${context}
+>>>
+` : ''}
+Submission parts (JSON):
+${JSON.stringify(parts)}
+
+Answer with JSON only: {"title": "<project title, under 80 characters>", "parts": {"<part id>": <answer>}}.
+For a "text" or "file" part the answer is the full text (a file part becomes a document: use "## " headings and
+paragraphs, roughly 400–900 words unless the part asks otherwise). For an "options" or "yesNo" part the answer is the
+option index "i". Skip "url" and "image" parts.`;
+        const answer = await generateJson(prompt);
+        return { title: String(answer?.title || item.name).slice(0, 120), parts: answer?.parts || {} };
+    }
+
+    // Uppy dashboard of the part: Add File → file input → Upload (when not automatic) → the file listed in the part.
+    async function uploadFile(partId, file) {
+        const button = partControls(partId, 'button').find(el => /add file|upload|добавить файл|загрузить/i.test(buttonText(el))) ||
+            findButton(/^(add file|upload file|добавить файл|загрузить файл)$/i);
+        if (!button) return false;
+        button.click();
+        if (!await waitFor(() => document.querySelector('.uppy-Dashboard input[type="file"], [role="dialog"] input[type="file"]'), 8000)) return false;
+        const input = document.querySelector('.uppy-Dashboard input[type="file"], [role="dialog"] input[type="file"]');
+        const transfer = new DataTransfer();
+        transfer.items.add(file);
+        input.files = transfer.files;
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+        await sleep(1500);
+        const upload = findButton(/^(upload|upload \d+ files?|загрузить|загрузить \d+ файл\S*)$/i);
+        if (upload) upload.click();
+        // Uploaded: the part lists the file outside the upload dialog.
+        const listed = () => [...document.querySelectorAll('a, span, p, div, li')].some(el => !el.childElementCount &&
+            el.textContent.includes(file.name) && !el.closest('.uppy-Dashboard, [role="dialog"], [aria-modal="true"]'));
+        await waitFor(listed, 60000, 500);
+        const dashboard = document.querySelector('.uppy-Dashboard');
+        if (isShown(dashboard)) {
+            const done = findButton(/^(done|close|готово|закрыть)$/i, dashboard.closest('[role="dialog"]') || dashboard);
+            if (done) done.click();
+        }
+        return listed();
+    }
+
+    async function submitPeer(run, item) {
+        const assignment = await peerAssignment(run, item);
+        showRun(run, tr('autopilotPeerWrite', { title: item.name }));
+        const answer = await writeSubmission(item, assignment);
+        const manual = [];
+        const title = document.getElementById('title') || document.querySelector('input[aria-label="Project Title"]');
+        if (title) setNativeValue(title, answer.title);
+        for (const part of assignment.submissionParts) {
+            const kind = partKind(part);
+            const value = answer.parts[part.id];
+            let ok = false;
+            if (kind === 'file' && value) {
+                const file = Naki.files.makeFile(answer.title, String(value), part.details?.definition?.allowedFiles || []);
+                if (file) {
+                    showRun(run, tr('autopilotPeerUpload', { name: file.name }));
+                    ok = await uploadFile(part.id, file);
+                }
+            } else if ((kind === 'options' || kind === 'yesNo') && value !== undefined) {
+                ok = chooseOption(part.id, optionsOf(part), Number(value));
+            } else if (kind === 'text' && value) {
+                ok = fillText(part.id, String(value));
+            }
+            if (!ok && part.details?.definition?.required !== false) manual.push(cmlText(part.prompt).slice(0, 60) || kind);
+            await sleep(300);
+        }
+        if (manual.length) return { ok: false, note: tr('peerNoteManual', { parts: manual.join('; ') }) };
+        await sleep(1000);
+        const submit = findButton(/^(submit|отправить)$/i);
+        if (!submit) return { ok: false, note: tr('autopilotStuck', { step: 'Submit' }) };
+        submit.click();
+        // Confirmation: "I understand…" checkbox (and sometimes the legal name), then Submit.
+        await waitFor(() => visibleDialog()?.querySelector('button'), 8000);
+        const dialog = visibleDialog();
+        if (dialog) {
+            for (const box of dialog.querySelectorAll('input[type="checkbox"]')) if (!box.checked) (box.labels?.[0] || box).click();
+            const name = dialog.querySelector('input[type="text"], input:not([type])');
+            const fullName = readUserData()?.fullName;
+            if (name && !name.value && fullName) setNativeValue(name, fullName);
+            await sleep(500);
+            const confirm = findButton(/^(submit|confirm|yes, submit|отправить|подтвердить)$/i, dialog);
+            if (confirm) confirm.click();
+        }
+        return { ok: true };
+    }
+
+    // The submission under review as text: text parts, links and the text of attached files.
+    async function submissionText(run, item, submissionId) {
+        const data = await getJson(`${API}/onDemandPeerSubmissions.v1/${run.userId}~${run.courseId}~${item.id}~${submissionId}/` +
+            '?fields=submission,onDemandPeerReviewSchemas.v1(reviewSchema),onDemandPeerSubmissionSchemas.v1(submissionSchema)&includes=submissionSchemas,reviewSchemas');
+        const element = data?.elements?.[0] || {};
+        const schema = data?.linked?.['onDemandPeerSubmissionSchemas.v1']?.[0]?.submissionSchema?.parts || [];
+        const reviewParts = data?.linked?.['onDemandPeerReviewSchemas.v1']?.[0]?.reviewSchema?.parts || null;
+        const sections = [`Title: ${element.submission?.title || ''}`];
+        for (const [id, part] of Object.entries(element.submission?.parts || {})) {
+            const prompt = cmlText(schema.find(entry => entry.id === id)?.prompt);
+            const definition = part.definition || {};
+            let content = '';
+            if (definition.fileUrl) {
+                const text = await Naki.files.textOf(definition.fileUrl).catch(() => '');
+                content = `[file "${definition.caption || definition.title || definition.fileUrl.split('/').pop()}"]\n${text || '(the file could not be read as text: an image, scan or archive)'}`;
+            } else if (definition.url) {
+                content = `[link] ${definition.url} ${definition.title || ''}`;
+            } else if (typeof definition.plainText === 'string') {
+                content = definition.plainText;
+            } else if (definition.richText) {
+                content = cmlText(definition.richText) || htmlToText(JSON.stringify(definition.richText));
+            } else {
+                content = JSON.stringify(definition).slice(0, 4000);
+            }
+            sections.push(`Part "${prompt || id}":\n${content}`);
+        }
+        return { text: sections.join('\n\n').slice(0, 30000), reviewParts };
+    }
+
+    async function reviewPeer(run, item, submissionId) {
+        const assignment = await peerAssignment(run, item);
+        const submission = await submissionText(run, item, submissionId);
+        const parts = (submission.reviewParts || assignment.reviewParts).map(part => ({
+            id: part.id, kind: partKind(part) === 'yesNo' ? 'options' : partKind(part), prompt: cmlText(part.prompt),
+            ...(['options', 'yesNo'].includes(partKind(part)) ? { options: optionsOf(part).map((option, i) => ({ i, text: option.text, points: option.points })) } : {})
+        }));
+        const prompt = `You are reviewing a classmate's submission for the peer-reviewed assignment "${item.name}" of an online course.
+Grade it honestly and fairly by the rubric: give credit only for what the submission actually contains. An empty,
+unreadable or off-topic submission gets the lowest option. Feedback must be specific to this submission, constructive
+and polite, 2–5 sentences, in the language of the submission.
+
+Assignment instructions and review criteria:
+<<<
+${assignment.instructions.slice(0, 8000)}
+>>>
+
+The submission:
+<<<
+${submission.text}
+>>>
+
+Rubric (JSON):
+${JSON.stringify(parts)}
+
+Answer with JSON only: {"<rubric id>": <answer>}, where the answer is the option index "i" for an "options" item and
+the feedback text for a "text" item.`;
+        const answer = await generateJson(prompt);
+        let filled = 0;
+        for (const part of parts) {
+            const value = answer?.[part.id];
+            if (value === undefined || value === null) continue;
+            const ok = part.kind === 'options'
+                ? chooseOption(part.id, part.options, Number(value))
+                : fillText(part.id, String(value));
+            if (ok) filled++;
+            await sleep(200);
+        }
+        if (!filled && parts.length) return false;
+        await sleep(800);
+        const submit = findButton(/^(submit review|отправить отзыв|отправить рецензию)$/i);
+        if (!submit) return false;
+        submit.click();
+        await sleep(2500);
+        const dialog = visibleDialog();
+        const confirm = dialog && findButton(/^(submit|submit review|confirm|отправить|подтвердить)$/i, dialog);
+        if (confirm) confirm.click();
+        return true;
+    }
+
+    const setPeerPhase = async (run, phase) => {
+        run.phase = phase;
+        run.phaseAt = Date.now();
+        await saveRun(run);
+    };
+
+    async function peerStep(run, item) {
+        run.peer = run.peer || { reviewed: [], required: null };
+        const [, route = '', submissionId = null] = peerRoute();
+        const page = route.split('/')[0];
+        if (run.phase === 'open' || run.phase === 'navigating') {
+            const assignment = await peerAssignment(run, item);
+            run.peer.required = assignment.required ?? 1;
+            await setPeerPhase(run, await peerSubmitted(run, item) ? 'peer-review' : 'peer-submit');
+        }
+        if (run.phase === 'peer-submit') {
+            if (page !== 'submit') {
+                location.assign(peerUrl(run, item, '/submit'));
+                return;
+            }
+            await waitFor(() => document.getElementById('title') || findButton(/^(submit|отправить)$/i), 15000);
+            if (await peerSubmitted(run, item)) {
+                await setPeerPhase(run, 'peer-review');
+                return;
+            }
+            // A step that throws is retried by the loop: at most twice, each try costs a request to the model.
+            run.peer.tries = (run.peer.tries || 0) + 1;
+            await saveRun(run);
+            if (run.peer.tries > 2) {
+                await nextItem(run, { name: item.name, pass: false, percent: null, note: tr('peerNoteNotSubmitted') });
+                return;
+            }
+            const result = await submitPeer(run, item);
+            if (!result.ok) {
+                await nextItem(run, { name: item.name, pass: false, percent: null, note: result.note });
+                return;
+            }
+            await setPeerPhase(run, 'peer-submitted');
+            return;
+        }
+        if (run.phase === 'peer-submitted') {
+            if (await peerSubmitted(run, item)) {
+                await setPeerPhase(run, 'peer-review');
+            } else if (Date.now() - run.phaseAt > 60000) {
+                await nextItem(run, { name: item.name, pass: false, percent: null, note: tr('peerNoteNotSubmitted') });
+            }
+            return;
+        }
+        if (run.phase !== 'peer-review') return;
+        const reviewed = run.peer.reviewed;
+        if (page === 'review' && submissionId) {
+            if (reviewed.includes(submissionId)) {
+                location.assign(peerUrl(run, item, '/give-feedback'));
+                return;
+            }
+            await waitFor(() => findButton(/^(submit review|отправить отзыв|отправить рецензию)$/i), 15000);
+            showRun(run, tr('autopilotPeerReview', { n: reviewed.length + 1, total: run.peer.required, title: item.name }));
+            const ok = await reviewPeer(run, item, submissionId).catch(error => { console.warn('[Naki] Peer review failed:', error); return false; });
+            reviewed.push(submissionId);
+            if (!ok) run.peer.failed = (run.peer.failed || 0) + 1;
+            await setPeerPhase(run, 'peer-review');
+            await sleep(1500);
+            location.assign(peerUrl(run, item, '/give-feedback'));
+            return;
+        }
+        if (page !== 'give-feedback') {
+            location.assign(peerUrl(run, item, '/give-feedback'));
+            return;
+        }
+        await waitFor(() => document.querySelector('a[href*="/review/"]') || /left to complete|осталось/i.test(document.body.innerText), 15000);
+        const left = document.body.innerText.match(/(\d+)\s+(?:left to complete|reviews? left)|осталось[^\d]{0,20}(\d+)/i);
+        const leftCount = left ? Number(left[1] ?? left[2]) : null;
+        const done = reviewed.length - (run.peer.failed || 0);
+        const finished = leftCount !== null ? leftCount === 0 : done >= run.peer.required;
+        const links = [...document.querySelectorAll('a[href*="/review/"]')].map(link => link.getAttribute('href').match(/\/review\/([^/?#]+)/)?.[1]).filter(Boolean);
+        const next = links.find(id => !reviewed.includes(id));
+        if (finished || !next || reviewed.length >= run.peer.required + 4) {
+            const note = finished ? tr('peerNoteDone', { n: done }) : tr('peerNoteNoPeers', { n: done });
+            await nextItem(run, { name: item.name, pass: finished, percent: null, note });
+            return;
+        }
+        location.assign(peerUrl(run, item, `/review/${next}`));
+    }
+
+    // The solve button / hotkey on a peer-reviewed assignment: submit it and review classmates, like the autopilot.
+    const peerItemHere = () => location.pathname.match(/\/learn\/[^/]+\/peer\/([^/]+)/)?.[1] || null;
+    const solveHere = () => (peerItemHere() ? startAutopilot({ only: peerItemHere() }) : solveQuiz());
+
     // ------------------------------------------------------------------ hotkeys
 
     function isEditableTarget(target) {
@@ -1106,9 +1419,9 @@
         }
         if (event.repeat) return;
         const { solve, skip } = state.settings.hotkeys;
-        const action = Naki.hotkeyMatches(solve, event) ? solveQuiz : Naki.hotkeyMatches(skip, event) ? skipContent : null;
+        const action = Naki.hotkeyMatches(solve, event) ? solveHere : Naki.hotkeyMatches(skip, event) ? skipContent : null;
         if (!action) return;
-        const hotkey = action === solveQuiz ? solve : skip;
+        const hotkey = action === solveHere ? solve : skip;
         if (!Naki.hasModifier(hotkey) && isEditableTarget(event.target)) return;
         event.preventDefault();
         event.stopImmediatePropagation();
@@ -1120,7 +1433,7 @@
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         switch (message?.type) {
             case Naki.MSG.SOLVE:
-                solveQuiz();
+                solveHere();
                 sendResponse({ ok: true });
                 break;
             case Naki.MSG.SKIP:
@@ -1150,7 +1463,7 @@
     });
 
     chrome.storage.onChanged.addListener((changes, area) => {
-        if (area === 'local') for (const key of Object.keys(changes)) if (key.startsWith(MATERIALS_KEY)) materialsCache.delete(key.slice(MATERIALS_KEY.length));
+        if (area === 'local') for (const key of Object.keys(changes)) if (key.startsWith(Materials.KEY)) materialsCache.delete(key.slice(Materials.KEY.length));
         if (area !== 'local') return;
         Naki.loadSettings().then(settings => { state.settings = settings; });
     });
