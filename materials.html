@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>NSolver — База материалов</title>
+    <link rel="stylesheet" href="panel.css">
+    <link rel="stylesheet" href="materials.css">
+</head>
+<body data-view="page">
+    <div class="mb">
+        <header class="header mb-header">
+            <img src="images/48.png" alt="">
+            <div class="brand">
+                <h1 id="heading"></h1>
+                <p>NSolver · made by Naki</p>
+            </div>
+            <label class="btn secondary small mb-import"><span id="importLabel"></span><input type="file" id="importFile" accept="application/json,.json" hidden></label>
+        </header>
+        <p class="hint" id="hint"></p>
+        <p class="message" id="notice"></p>
+        <div class="mb-layout">
+            <aside class="card mb-courses">
+                <div class="card-title"><h2 id="coursesTitle"></h2><span id="coursesSummary"></span></div>
+                <div id="courseList" class="mb-course-list"></div>
+            </aside>
+            <main class="card mb-detail" id="detail"></main>
+        </div>
+    </div>
+    <script src="shared.js"></script>
+    <script src="materials.js"></script>
+</body>
+</html>

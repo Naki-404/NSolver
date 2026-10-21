@@ -346,20 +346,47 @@
         return htmlToText(html.replace(/<\/(p|div|li|h[1-6]|tr|td|th|blockquote|pre)>|<br\s*\/?>/gi, '$& '));
     }
 
+    // Courses edited by hand in the materials base (materials.html) are kept: never evicted, never refreshed by age.
     async function rememberCourse(slug) {
         const { [MATERIALS_INDEX_KEY]: index = [] } = await chrome.storage.local.get(MATERIALS_INDEX_KEY);
         const next = [slug, ...index.filter(other => other !== slug)];
-        await chrome.storage.local.set({ [MATERIALS_INDEX_KEY]: next.slice(0, MATERIALS_MAX_COURSES) });
-        const evicted = next.slice(MATERIALS_MAX_COURSES);
+        const overflow = next.slice(MATERIALS_MAX_COURSES);
+        if (!overflow.length) {
+            await chrome.storage.local.set({ [MATERIALS_INDEX_KEY]: next });
+            return;
+        }
+        const stored = await chrome.storage.local.get(overflow.map(other => MATERIALS_KEY + other));
+        const kept = overflow.filter(other => stored[MATERIALS_KEY + other]?.edited);
+        const evicted = overflow.filter(other => !kept.includes(other));
+        await chrome.storage.local.set({ [MATERIALS_INDEX_KEY]: [...next.slice(0, MATERIALS_MAX_COURSES), ...kept] });
         if (evicted.length) await chrome.storage.local.remove(evicted.map(other => MATERIALS_KEY + other));
     }
 
-    // Lecture transcripts and readings of the course, from the cache or downloaded (onProgress(done, total)).
-    async function loadCourseDocs(slug, onProgress) {
-        if (materialsCache.has(slug)) return materialsCache.get(slug);
+    async function fetchCourseName(slug) {
+        const data = await getJson(`${API}/onDemandCourses.v1?q=slug&slug=${encodeURIComponent(slug)}&fields=name`).catch(() => null);
+        return data?.elements?.[0]?.name || slug;
+    }
+
+    // A fresh download keeps what was done by hand: notes, edited texts and switched-off materials.
+    function mergeManual(downloaded, previous) {
+        if (!previous?.length) return downloaded;
+        const byKey = new Map(previous.filter(doc => doc.type !== 'note').map(doc => [`${doc.type}|${doc.title}`, doc]));
+        const docs = downloaded.map(doc => {
+            const old = byKey.get(`${doc.type}|${doc.title}`);
+            if (!old) return doc;
+            return { ...doc, ...(old.edited ? { text: old.text, edited: true } : {}), ...(old.disabled ? { disabled: true } : {}) };
+        });
+        return [...docs, ...previous.filter(doc => doc.type === 'note')];
+    }
+
+    // Lecture transcripts and readings of the course (+ notes added by hand), from the base or downloaded.
+    // force: download again even when the base has the course (manual edits are kept).
+    async function loadCourseDocs(slug, onProgress, { force = false } = {}) {
+        if (!force && materialsCache.has(slug)) return materialsCache.get(slug);
         const key = MATERIALS_KEY + slug;
         const stored = (await chrome.storage.local.get(key))[key];
-        if (stored && Date.now() - stored.savedAt < MATERIALS_TTL_MS && stored.docs?.length) {
+        const fresh = stored && (stored.edited || Date.now() - stored.savedAt < MATERIALS_TTL_MS);
+        if (!force && fresh && stored.docs?.length) {
             materialsCache.set(slug, stored.docs);
             rememberCourse(slug).catch(() => { });
             return stored.docs;
@@ -369,21 +396,23 @@
         const sources = orderedCourseItems(materials)
             .map((entry, order) => ({ ...entry, order }))
             .filter(({ item }) => ['lecture', 'supplement'].includes(item.contentSummary?.typeName) && !item.isLocked);
-        const docs = [];
+        const downloaded = [];
         let done = 0;
         await runLimited(sources, 6, async ({ item, module, order }) => {
             const type = item.contentSummary.typeName;
             const raw = type === 'lecture' ? await lectureText(courseId, item.id) : await readingText(courseId, item.id);
             const text = String(raw || '').replace(/\s+/g, ' ').trim();
-            if (text.length > 40) docs.push({ order, type, title: item.name, module, text });
+            if (text.length > 40) downloaded.push({ order, type, title: item.name, module, text });
         }, () => onProgress && onProgress(++done, sources.length));
-        docs.sort((a, b) => a.order - b.order);
+        downloaded.sort((a, b) => a.order - b.order);
+        const docs = mergeManual(downloaded, stored?.docs);
         if (docs.length) {
-            await chrome.storage.local.set({ [key]: { savedAt: Date.now(), docs } });
+            const name = stored?.name && stored.name !== slug ? stored.name : await fetchCourseName(slug);
+            await chrome.storage.local.set({ [key]: { savedAt: Date.now(), name, docs, ...(stored?.edited ? { edited: true } : {}) } });
             await rememberCourse(slug);
         }
         materialsCache.set(slug, docs);
-        console.log(`[Naki] Course materials: ${docs.length} of ${sources.length} lectures/readings, ${docs.reduce((sum, doc) => sum + doc.text.length, 0)} chars`);
+        console.log(`[Naki] Course materials: ${downloaded.length} of ${sources.length} lectures/readings, ${docs.reduce((sum, doc) => sum + doc.text.length, 0)} chars`);
         return docs;
     }
 
@@ -397,7 +426,7 @@
     // Overlapping chunks, cut at word boundaries.
     function chunkDocs(docs) {
         const chunks = [];
-        for (const doc of docs) {
+        for (const doc of docs.filter(item => !item.disabled && item.text)) {
             let start = 0;
             while (start < doc.text.length) {
                 let end = Math.min(doc.text.length, start + CHUNK_CHARS);
@@ -447,7 +476,24 @@
             if (used > CONTEXT_CHARS - 400) break;
         }
         picked.sort((a, b) => a.doc.order - b.doc.order || a.start - b.start);
-        return picked.map(chunk => `[${chunk.doc.type === 'lecture' ? 'Lecture' : 'Reading'}: ${chunk.doc.title}] ${chunk.text}`).join('\n\n');
+        const label = type => ({ lecture: 'Lecture', supplement: 'Reading', note: 'Note' }[type] || 'Material');
+        return picked.map(chunk => `[${label(chunk.doc.type)}: ${chunk.doc.title}] ${chunk.text}`).join('\n\n');
+    }
+
+    // "Load this course" in the panel: download (again) into the materials base, keeping manual edits.
+    async function loadMaterialsNow() {
+        const slug = courseSlug();
+        if (!slug) {
+            toast(tr('toastNoCourse'), 'error');
+            return;
+        }
+        const progress = toast(tr('toastMaterials', { done: 0, total: '…' }), 'info', 0);
+        try {
+            const docs = await loadCourseDocs(slug, (done, total) => progress.update(tr('toastMaterials', { done, total }), 'info', 0), { force: true });
+            progress.update(tr('toastMaterialsLoaded', { n: docs.length }), docs.length ? 'success' : 'error', 6000);
+        } catch (error) {
+            progress.update(tr('toastSkipError', { error: error.message }), 'error', 8000);
+        }
     }
 
     // contextFor(questions) for ModelProvider, or null when the course materials are off or unavailable.
@@ -1081,6 +1127,10 @@
                 skipContent();
                 sendResponse({ ok: true });
                 break;
+            case Naki.MSG.MATERIALS_LOAD:
+                loadMaterialsNow();
+                sendResponse({ ok: true });
+                break;
             case Naki.MSG.AUTOPILOT:
                 startAutopilot();
                 sendResponse({ ok: true });
@@ -1100,6 +1150,7 @@
     });
 
     chrome.storage.onChanged.addListener((changes, area) => {
+        if (area === 'local') for (const key of Object.keys(changes)) if (key.startsWith(MATERIALS_KEY)) materialsCache.delete(key.slice(MATERIALS_KEY.length));
         if (area !== 'local') return;
         Naki.loadSettings().then(settings => { state.settings = settings; });
     });

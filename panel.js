@@ -110,6 +110,14 @@
             </section>
 
             <section class="card">
+                <div class="card-title"><h2 data-i18n="materialsTitle"></h2><span id="materialsSummary"></span></div>
+                <div class="materials-actions">
+                    <button class="btn secondary small" id="materialsOpen" type="button"><span data-i18n="materialsOpen"></span></button>
+                    <button class="btn secondary small" id="materialsLoad" type="button" hidden><span data-i18n="materialsLoad"></span></button>
+                </div>
+            </section>
+
+            <section class="card">
                 <div class="card-title"><h2 data-i18n="hotkeys"></h2></div>
                 <div class="hotkey" data-action="solve">
                     <span class="name">Quiz Solver</span>
@@ -213,6 +221,7 @@
     // Coursera and Cisco NetAcad share the solve button; the rest of the main page depends on the site.
     function showSite(site) {
         const netacad = site === 'netacad';
+        $('materialsLoad').hidden = site !== 'coursera';
         $('autoSolveRow').hidden = netacad;
         $('courseContextRow').hidden = netacad;
         $('skipDiscussionsRow').hidden = netacad;
@@ -224,7 +233,7 @@
         try {
             const result = await sendToTab({ type: Naki.MSG.STATUS });
             if (!result?.ok) throw new Error('no status');
-            showSite(result.site);
+            showSite(result.site || 'coursera');
             if (result.autopilot) setStatus('busy', 'statusAutopilot');
             else if (result.solving) setStatus('busy', 'statusSolving');
             else if (result.site === 'netacad') setStatus(result.skipping ? 'busy' : 'ready', result.skipping ? 'statusSkipping' : 'statusNetacad');
@@ -402,6 +411,29 @@
 
     $('loadModels').addEventListener('click', () => loadModels({ apiKey: $('apiKey').value }));
 
+    // ------------------------------------------------------------------ materials base
+
+    const MATERIALS_PREFIX = 'nakiMaterials:';
+
+    async function renderMaterialsSummary() {
+        const { nakiMaterialsIndex: index = [] } = await chrome.storage.local.get('nakiMaterialsIndex');
+        const records = index.length ? await chrome.storage.local.get(index.map(slug => MATERIALS_PREFIX + slug)) : {};
+        const values = Object.values(records).filter(record => record && Array.isArray(record.docs));
+        const bytes = values.reduce((sum, record) => sum + JSON.stringify(record).length, 0);
+        const size = bytes > 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;
+        $('materialsSummary').textContent = values.length ? tr('materialsSummary', { courses: values.length, size }) : tr('materialsEmpty');
+        $('materialsSummary').title = $('materialsSummary').textContent;
+    }
+
+    $('materialsOpen').addEventListener('click', () => chrome.tabs.create({ url: chrome.runtime.getURL('materials.html') }));
+    $('materialsLoad').addEventListener('click', async () => {
+        try {
+            await sendToTab({ type: Naki.MSG.MATERIALS_LOAD });
+        } catch (e) {
+            setStatus('', 'statusNoCourse');
+        }
+    });
+
     $('provider').addEventListener('change', async () => {
         keyMessage = null;
         customMode = false;
@@ -541,6 +573,7 @@
     // ------------------------------------------------------------------ init
 
     async function reload() {
+        renderMaterialsSummary().catch(() => { });
         settings = await Naki.loadSettings();
         const { modelLists: stored } = await chrome.storage.local.get('modelLists');
         modelLists = stored && typeof stored === 'object' ? stored : {};

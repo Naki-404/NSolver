@@ -233,3 +233,7 @@ select { text-overflow: ellipsis; }
 
 /* quiz autopilot: retake choice next to its label */
 .compact-select { width: 136px; flex: none; height: 30px; font-size: 12px; }
+
+/* materials base card */
+.materials-actions { display: flex; gap: 6px; }
+.materials-actions .btn.small { flex: 1; width: auto; }

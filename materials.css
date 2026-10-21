@@ -1,0 +1,55 @@
+/* NSolver — materials base page (on top of panel.css). NSolver, made by Naki — https://github.com/Naki-404/NSolver */
+body[data-view="page"] { min-height: 100vh; }
+
+.mb { max-width: 1180px; margin: 0 auto; padding: 18px 16px 32px; display: flex; flex-direction: column; gap: 10px; }
+.mb-header img { width: 40px; height: 40px; }
+.mb-header .brand h1 { font-size: 18px; }
+.mb-import { cursor: pointer; }
+
+.mb-layout { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 10px; align-items: start; }
+@media (max-width: 760px) { .mb-layout { grid-template-columns: minmax(0, 1fr); } }
+
+.mb-course-list { display: flex; flex-direction: column; gap: 6px; }
+.mb-course {
+    display: flex; flex-direction: column; gap: 2px; text-align: left; width: 100%;
+    padding: 9px 10px; border-radius: 10px; border: 1px solid var(--border);
+    background: var(--surface-2); color: var(--text); font: inherit; cursor: pointer;
+}
+.mb-course:hover { border-color: rgba(139, 92, 246, .5); }
+.mb-course.active { box-shadow: inset 0 0 0 1px rgba(139, 92, 246, .7); }
+.mb-course b { font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mb-course small { color: var(--muted); font-size: 11px; }
+
+.mb-detail { min-height: 300px; }
+.mb-detail-head { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.mb-detail-head h2 { margin: 0; font-size: 15px; }
+.mb-detail-head p { margin: 2px 0 0; color: var(--muted); font-size: 11.5px; }
+.mb-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.mb-actions .btn.small { width: auto; padding: 0 12px; }
+.btn.danger { background: transparent; border: 1px solid rgba(248, 113, 113, .45); color: var(--error); box-shadow: none; }
+
+.mb-add { border: 1px dashed var(--border); border-radius: 12px; padding: 8px 10px; }
+.mb-add summary { cursor: pointer; font-weight: 600; font-size: 12.5px; }
+.mb-add[open] summary { margin-bottom: 8px; }
+.mb-add form { display: flex; flex-direction: column; gap: 6px; }
+.mb textarea {
+    width: 100%; min-height: 160px; resize: vertical; padding: 8px 10px;
+    border-radius: 10px; border: 1px solid var(--border); background: var(--surface-2); color: var(--text);
+    font: 12.5px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; outline: none;
+}
+.mb textarea:focus { border-color: rgba(139, 92, 246, .7); }
+
+.mb-docs { display: flex; flex-direction: column; gap: 4px; }
+.mb-doc { border-radius: 10px; border: 1px solid var(--border); background: var(--surface-2); }
+.mb-doc.off { opacity: .55; }
+.mb-doc-row { display: flex; align-items: center; gap: 8px; padding: 7px 10px; }
+.mb-doc-row .switch { transform: scale(.85); }
+.mb-doc-title { flex: 1; min-width: 0; text-align: left; background: none; border: 0; padding: 0; color: var(--text); font: inherit; font-size: 12.5px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mb-doc-title:hover { color: #fff; text-decoration: underline; }
+.mb-badge { flex: none; font-size: 10.5px; font-weight: 700; padding: 1px 7px; border-radius: 999px; background: rgba(139, 92, 246, .18); color: #c4b5fd; }
+.mb-badge.lecture { background: rgba(6, 182, 212, .16); color: #67e8f9; }
+.mb-badge.note { background: rgba(52, 211, 153, .16); color: #6ee7b7; }
+.mb-meta { flex: none; font-size: 11px; color: var(--muted); }
+.mb-doc-body { padding: 0 10px 10px; display: flex; flex-direction: column; gap: 6px; }
+.mb-doc-body .mb-actions { justify-content: flex-end; }
+.mb-empty { color: var(--muted); font-size: 12.5px; margin: 8px 0; }
