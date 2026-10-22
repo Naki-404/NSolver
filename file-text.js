@@ -1,6 +1,7 @@
 // Files for Coursera peer-reviewed assignments: the text of a classmate's submission (PDF, DOCX, PPTX, plain text)
-// for the review, and a PDF / DOCX / TXT made from the generated answer for the upload. No libraries: PDF text comes
-// from the page content streams (ToUnicode maps included), Office files are zip archives of XML.
+// for the review, and a DOCX / PDF / TXT made from the generated answer for the upload, with tables and charts drawn
+// from plot specs. No libraries: PDF text comes from the page content streams (ToUnicode maps included), Office files
+// are zip archives of XML, charts are drawn on an OffscreenCanvas.
 // NSolver, made by Naki — https://github.com/Naki-404/NSolver
 Naki.files = (function () {
     const MAX_TEXT = 20000;
@@ -356,23 +357,260 @@ Naki.files = (function () {
         return lines;
     }
 
-    function makePdf(title, text) {
+    // ------------------------------------------------------------------ the answer as a document
+
+    const inline = s => s.replace(/\*\*(.+?)\*\*/g, '$1').replace(/`([^`]+)`/g, '$1');
+    const TABLE_ROW = /^\s*\|.*\|\s*$/;
+
+    // "## " headings, paragraphs ("- " items become bullets), markdown tables and ```plot blocks with a JSON spec.
+    function parseBlocks(text) {
+        const lines = String(text).replace(/\r/g, '').split('\n');
+        const blocks = [];
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i];
+            if (/^\s*```\s*(plot|chart|graph)\s*$/i.test(line)) {
+                const body = [];
+                while (++i < lines.length && !/^\s*```\s*$/.test(lines[i])) body.push(lines[i]);
+                try {
+                    blocks.push({ type: 'plot', spec: JSON.parse(body.join('\n')) });
+                } catch (error) {
+                    console.warn('[Naki] Plot spec is not valid JSON:', error.message);
+                }
+                continue;
+            }
+            if (/^\s*```/.test(line)) continue; // other code fences: their lines stay as text
+            if (TABLE_ROW.test(line)) {
+                const rows = [];
+                for (; i < lines.length && TABLE_ROW.test(lines[i]); i++) {
+                    if (/^\s*\|[\s:|-]+\|\s*$/.test(lines[i])) continue; // |---|:---:|
+                    rows.push(lines[i].trim().replace(/^\||\|$/g, '').split('|').map(cell => inline(cell.trim())));
+                }
+                i--;
+                blocks.push({ type: 'table', rows });
+                continue;
+            }
+            const heading = line.match(/^\s*#{1,4}\s+(.*)/);
+            blocks.push(heading ? { type: 'heading', text: inline(heading[1]) } : { type: 'para', text: inline(line.replace(/^(\s*)[-*]\s+/, '$1• ')) });
+        }
+        return blocks;
+    }
+
+    // Arithmetic expressions of the plot specs: numbers, t / x, + - * / ^, parentheses, pi, e and Math functions.
+    // A small parser instead of eval (not allowed in extensions).
+    const FUNCTIONS = { exp: Math.exp, log: Math.log, ln: Math.log, log10: Math.log10, sqrt: Math.sqrt, sin: Math.sin, cos: Math.cos, tan: Math.tan,
+        asin: Math.asin, acos: Math.acos, atan: Math.atan, atan2: Math.atan2, sinh: Math.sinh, cosh: Math.cosh, tanh: Math.tanh, abs: Math.abs,
+        min: Math.min, max: Math.max, floor: Math.floor, ceil: Math.ceil, round: Math.round, sign: Math.sign, pow: Math.pow };
+    const CONSTANTS = { pi: Math.PI, e: Math.E };
+
+    function compile(source) {
+        const text = String(source).replace(/·|×/g, '*').replace(/−/g, '-');
+        const tokens = text.match(/\d+\.?\d*(?:e[+-]?\d+)?|\.\d+|[A-Za-z_]\w*|\*\*|[-+*/^(),]/gi) || [];
+        if (tokens.join('') !== text.replace(/\s+/g, '')) throw new Error(`unsupported expression: ${source}`);
+        let pos = 0;
+        const peek = () => tokens[pos];
+        const next = () => tokens[pos++];
+        const binary = (operand, operators) => () => {
+            let node = operand();
+            while (operators[peek()]) {
+                const apply = operators[next()], left = node, right = operand();
+                node = scope => apply(left(scope), right(scope));
+            }
+            return node;
+        };
+        const unary = () => {
+            if (peek() === '-') { next(); const inner = unary(); return scope => -inner(scope); }
+            if (peek() === '+') { next(); return unary(); }
+            return power();
+        };
+        const term = binary(unary, { '*': (a, b) => a * b, '/': (a, b) => a / b });
+        const expression = binary(term, { '+': (a, b) => a + b, '-': (a, b) => a - b });
+        function power() {
+            const base = primary();
+            if (peek() !== '^' && peek() !== '**') return base;
+            next();
+            const exponent = unary();
+            return scope => Math.pow(base(scope), exponent(scope));
+        }
+        function primary() {
+            const token = next();
+            if (token === undefined) throw new Error(`incomplete expression: ${source}`);
+            if (token === '(') {
+                const inner = expression();
+                if (next() !== ')') throw new Error(`missing ")": ${source}`);
+                return inner;
+            }
+            if (/^[\d.]/.test(token)) { const value = Number(token); return () => value; }
+            const name = token.toLowerCase();
+            if (FUNCTIONS[name] && peek() === '(') {
+                next();
+                const args = [];
+                if (peek() !== ')') do args.push(expression()); while (peek() === ',' && next());
+                if (next() !== ')') throw new Error(`missing ")": ${source}`);
+                return scope => FUNCTIONS[name](...args.map(arg => arg(scope)));
+            }
+            if (name in CONSTANTS) return () => CONSTANTS[name];
+            return scope => { if (name in scope) return scope[name]; throw new Error(`unknown name "${token}" in ${source}`); };
+        }
+        const root = expression();
+        if (pos < tokens.length) throw new Error(`unexpected "${peek()}" in ${source}`);
+        return root;
+    }
+
+    // Series of a plot spec as point lists: "points" [[x, y], …], "expr" over [from, to], or "segments" (piecewise,
+    // e.g. a switching system: [{"from", "to", "expr"}], each expression in absolute time).
+    function seriesPoints(series, xRange) {
+        const sample = (expr, from, to, count) => {
+            const f = compile(expr);
+            const out = [];
+            for (let k = 0; k <= count; k++) {
+                const x = from + (to - from) * k / count;
+                out.push([x, f({ t: x, x })]);
+            }
+            return out;
+        };
+        if (Array.isArray(series.points)) return series.points.map(p => [Number(p[0]), Number(p[1])]);
+        if (Array.isArray(series.segments)) return series.segments.flatMap(seg => sample(seg.expr, Number(seg.from), Number(seg.to), 120));
+        if (series.expr) return sample(series.expr, Number(series.from ?? xRange[0]), Number(series.to ?? xRange[1]), 400);
+        return [];
+    }
+
+    function niceTicks(min, max, count = 6) {
+        const span = max - min || 1;
+        const raw = span / count, magnitude = 10 ** Math.floor(Math.log10(raw));
+        const step = [1, 2, 2.5, 5, 10].map(m => m * magnitude).find(s => s >= raw) || magnitude * 10;
+        const ticks = [];
+        for (let v = Math.ceil(min / step) * step; v <= max + step * 1e-9; v += step) ticks.push(Math.abs(v) < step * 1e-9 ? 0 : v);
+        return ticks;
+    }
+    const tickText = v => (Math.abs(v) >= 1e4 || (Math.abs(v) < 1e-3 && v !== 0) ? v.toExponential(1) : String(Number(v.toPrecision(6))));
+
+    const COLORS = ['#1f77b4', '#d62728', '#2ca02c', '#ff7f0e', '#9467bd', '#8c564b', '#e377c2', '#17becf'];
+
+    // A line chart (title, axes, grid, legend, dashed reference lines) as PNG or JPEG bytes.
+    async function renderPlot(spec, type = 'image/png') {
+        const W = 960, H = 560, L = 90, R = 30, T = 56, B = 76;
+        const xRange = Array.isArray(spec.xRange) ? spec.xRange.map(Number) : [0, 10];
+        const series = (spec.series || []).map((s, i) => ({ label: String(s.label || ''), color: COLORS[i % COLORS.length], points: seriesPoints(s, xRange).filter(p => Number.isFinite(p[0]) && Number.isFinite(p[1])) }))
+            .filter(s => s.points.length > 1);
+        if (!series.length) throw new Error('the plot has no data');
+        const lines = (spec.hlines || []).map(line => (typeof line === 'number' ? { y: line } : { y: Number(line.y), label: line.label })).filter(line => Number.isFinite(line.y));
+        const xs = series.flatMap(s => s.points.map(p => p[0]));
+        const ys = [...series.flatMap(s => s.points.map(p => p[1])), ...lines.map(line => line.y)];
+        let [x0, x1] = Array.isArray(spec.xRange) ? xRange : [Math.min(...xs), Math.max(...xs)];
+        let [y0, y1] = Array.isArray(spec.yRange) ? spec.yRange.map(Number) : [Math.min(...ys), Math.max(...ys)];
+        if (x1 === x0) x1 = x0 + 1;
+        if (!Array.isArray(spec.yRange)) {
+            const pad = (y1 - y0) * 0.06 || Math.abs(y0) * 0.1 || 1;
+            y0 -= pad; y1 += pad;
+        }
+        const canvas = new OffscreenCanvas(W, H);
+        const g = canvas.getContext('2d');
+        const px = x => L + (x - x0) / (x1 - x0) * (W - L - R);
+        const py = y => H - B - (y - y0) / (y1 - y0) * (H - T - B);
+        g.fillStyle = '#fff';
+        g.fillRect(0, 0, W, H);
+        g.font = '15px Arial, sans-serif';
+        g.strokeStyle = '#e3e3e3';
+        g.fillStyle = '#333';
+        g.lineWidth = 1;
+        g.textAlign = 'center';
+        for (const v of niceTicks(x0, x1)) {
+            g.beginPath(); g.moveTo(px(v), T); g.lineTo(px(v), H - B); g.stroke();
+            g.fillText(tickText(v), px(v), H - B + 22);
+        }
+        g.textAlign = 'right';
+        for (const v of niceTicks(y0, y1)) {
+            g.beginPath(); g.moveTo(L, py(v)); g.lineTo(W - R, py(v)); g.stroke();
+            g.fillText(tickText(v), L - 10, py(v) + 5);
+        }
+        g.strokeStyle = '#333';
+        g.strokeRect(L, T, W - L - R, H - T - B);
+        g.textAlign = 'center';
+        g.fillText(String(spec.xLabel || 't'), L + (W - L - R) / 2, H - 24);
+        g.save(); g.translate(24, T + (H - T - B) / 2); g.rotate(-Math.PI / 2); g.fillText(String(spec.yLabel || ''), 0, 0); g.restore();
+        g.font = 'bold 18px Arial, sans-serif';
+        g.fillText(String(spec.title || ''), W / 2, 32);
+        g.save();
+        g.beginPath(); g.rect(L, T, W - L - R, H - T - B); g.clip();
+        g.setLineDash([8, 6]); g.strokeStyle = '#777'; g.lineWidth = 1.5;
+        g.font = '14px Arial, sans-serif'; g.fillStyle = '#555'; g.textAlign = 'left';
+        for (const line of lines) {
+            g.beginPath(); g.moveTo(L, py(line.y)); g.lineTo(W - R, py(line.y)); g.stroke();
+            if (line.label) g.fillText(line.label, L + 8, py(line.y) - 6);
+        }
+        g.setLineDash([]); g.lineWidth = 2.5;
+        for (const s of series) {
+            g.strokeStyle = s.color;
+            g.beginPath();
+            s.points.forEach(([x, y], k) => (k ? g.lineTo(px(x), py(y)) : g.moveTo(px(x), py(y))));
+            g.stroke();
+        }
+        g.restore();
+        const labelled = series.filter(s => s.label);
+        if (labelled.length) {
+            g.font = '14px Arial, sans-serif';
+            const boxW = Math.max(...labelled.map(s => g.measureText(s.label).width)) + 46, boxH = labelled.length * 22 + 10;
+            // The corner the curves cross least.
+            const corners = [[W - R - boxW - 10, T + 10], [L + 10, T + 10], [W - R - boxW - 10, H - B - boxH - 10], [L + 10, H - B - boxH - 10]];
+            const covered = ([x, y]) => series.reduce((sum, s) => sum + s.points.filter(([px0, py0]) => {
+                const cx = px(px0), cy = py(py0);
+                return cx >= x - 4 && cx <= x + boxW + 4 && cy >= y - 4 && cy <= y + boxH + 4;
+            }).length, 0) + lines.filter(line => py(line.y) >= y - 8 && py(line.y) <= y + boxH + 8).length * 20;
+            const [bx, by] = corners.reduce((best, corner) => (covered(corner) < covered(best) ? corner : best));
+            g.fillStyle = 'rgba(255,255,255,0.9)'; g.fillRect(bx, by, boxW, boxH);
+            g.strokeStyle = '#bbb'; g.lineWidth = 1; g.strokeRect(bx, by, boxW, boxH);
+            labelled.forEach((s, k) => {
+                g.strokeStyle = s.color; g.lineWidth = 3;
+                g.beginPath(); g.moveTo(bx + 8, by + 20 + k * 22); g.lineTo(bx + 32, by + 20 + k * 22); g.stroke();
+                g.fillStyle = '#222'; g.textAlign = 'left'; g.fillText(s.label, bx + 38, by + 25 + k * 22);
+            });
+        }
+        const blob = await canvas.convertToBlob({ type, quality: 0.92 });
+        return { bytes: new Uint8Array(await blob.arrayBuffer()), width: W, height: H };
+    }
+
+    // Blocks with the plots rendered ({ image } or { failed }).
+    async function renderBlocks(blocks, type) {
+        const out = [];
+        for (const block of blocks) {
+            if (block.type !== 'plot') { out.push(block); continue; }
+            try {
+                out.push({ ...block, image: await renderPlot(block.spec, type) });
+            } catch (error) {
+                console.warn('[Naki] Plot not drawn:', error.message);
+                out.push({ type: 'para', text: `[${block.spec.title || 'Plot'}]` });
+            }
+        }
+        return out;
+    }
+
+    async function makePdf(title, blocks) {
         const W = 595, H = 842, M = 56, width = W - 2 * M;
-        const lines = [];
-        for (const line of wrap(title, 16, true, width)) lines.push({ text: line, size: 16, bold: true, gap: 22 });
-        lines.push({ text: '', size: 11, gap: 10 });
-        for (const paragraph of String(text).replace(/\r/g, '').split('\n')) {
-            const heading = /^#{1,4}\s+/.test(paragraph);
-            const clean = paragraph.replace(/^#{1,4}\s+/, '').replace(/\*\*(.+?)\*\*/g, '$1').replace(/\t/g, '    ');
-            const size = heading ? 12.5 : 11;
-            for (const line of wrap(clean, size, heading, width)) lines.push({ text: line, size, bold: heading, gap: heading ? 18 : 15 });
+        const items = [];
+        for (const line of wrap(title, 16, true, width)) items.push({ text: line, size: 16, bold: true, gap: 22 });
+        items.push({ text: '', size: 11, gap: 10 });
+        for (const block of await renderBlocks(blocks, 'image/jpeg')) {
+            if (block.image) {
+                const h = width * block.image.height / block.image.width;
+                items.push({ image: block.image, h, gap: h + 10 });
+                if (block.spec.title) items.push({ text: '', size: 11, gap: 6 });
+            } else if (block.type === 'table') {
+                const columns = Math.max(...block.rows.map(row => row.length));
+                const colWidth = width / columns;
+                block.rows.forEach((row, r) => items.push({ cells: row.map(cell => wrap(cell, 9.5, r === 0, colWidth - 6)[0]), colWidth, size: 9.5, bold: r === 0, gap: 14 }));
+                items.push({ text: '', size: 11, gap: 6 });
+            } else {
+                const heading = block.type === 'heading';
+                const size = heading ? 12.5 : 11;
+                for (const line of wrap(block.text.replace(/\t/g, '    '), size, heading, width)) items.push({ text: line, size, bold: heading, gap: heading ? 18 : 15 });
+            }
         }
         const pages = [[]];
         let y = H - M;
-        for (const line of lines) {
-            if (y - line.gap < M) { pages.push([]); y = H - M; }
-            y -= line.gap;
-            pages[pages.length - 1].push({ ...line, y });
+        for (const item of items) {
+            if (y - item.gap < M) { pages.push([]); y = H - M; }
+            y -= item.gap;
+            pages[pages.length - 1].push({ ...item, y });
         }
         const escape = s => [...s].map(c => {
             const code = winAnsiCode(c);
@@ -384,12 +622,22 @@ Naki.files = (function () {
         const catalog = add(null), pagesId = add(null);
         const regular = add('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>');
         const bold = add('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>');
+        const images = [];
+        for (const page of pages) for (const item of page) if (item.image) {
+            item.name = `Im${images.length + 1}`;
+            images.push([item.name, add(`<< /Type /XObject /Subtype /Image /Width ${item.image.width} /Height ${item.image.height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${item.image.bytes.length} >>\nstream\n${latin1(item.image.bytes)}\nendstream`)]);
+        }
+        const xobjects = images.length ? ` /XObject << ${images.map(([name, id]) => `/${name} ${id} 0 R`).join(' ')} >>` : '';
+        const text = (s, x, y, size, isBold) => `BT /${isBold ? 'F2' : 'F1'} ${size} Tf ${x.toFixed(1)} ${y.toFixed(1)} Td (${escape(s)}) Tj ET`;
         const kids = [];
         for (const page of pages) {
-            const content = page.filter(line => line.text).map(line =>
-                `BT /${line.bold ? 'F2' : 'F1'} ${line.size} Tf ${M} ${line.y.toFixed(1)} Td (${escape(line.text)}) Tj ET`).join('\n');
+            const content = page.map(item => {
+                if (item.image) return `q ${width} 0 0 ${item.h.toFixed(1)} ${M} ${item.y.toFixed(1)} cm /${item.name} Do Q`;
+                if (item.cells) return item.cells.map((cell, c) => text(cell, M + c * item.colWidth, item.y, item.size, item.bold)).join('\n');
+                return item.text ? text(item.text, M, item.y, item.size, item.bold) : '';
+            }).filter(Boolean).join('\n');
             const contentId = add(`<< /Length ${content.length} >>\nstream\n${content}\nendstream`);
-            kids.push(add(`<< /Type /Page /Parent ${pagesId} 0 R /MediaBox [0 0 ${W} ${H}] /Resources << /Font << /F1 ${regular} 0 R /F2 ${bold} 0 R >> >> /Contents ${contentId} 0 R >>`));
+            kids.push(add(`<< /Type /Page /Parent ${pagesId} 0 R /MediaBox [0 0 ${W} ${H}] /Resources << /Font << /F1 ${regular} 0 R /F2 ${bold} 0 R >>${xobjects} >> /Contents ${contentId} 0 R >>`));
         }
         objects[catalog - 1] = `<< /Type /Catalog /Pages ${pagesId} 0 R >>`;
         objects[pagesId - 1] = `<< /Type /Pages /Kids [${kids.map(id => `${id} 0 R`).join(' ')}] /Count ${kids.length} >>`;
@@ -413,13 +661,13 @@ Naki.files = (function () {
         return (c ^ 0xffffffff) >>> 0;
     };
 
-    // A stored (uncompressed) zip archive.
+    // A stored (uncompressed) zip archive; contents are strings (UTF-8) or bytes.
     function makeZip(files) {
         const encoder = new TextEncoder();
         const chunks = [], central = [];
         let offset = 0;
         for (const [name, content] of files) {
-            const nameBytes = encoder.encode(name), data = encoder.encode(content), crc = crc32(data);
+            const nameBytes = encoder.encode(name), data = typeof content === 'string' ? encoder.encode(content) : content, crc = crc32(data);
             const local = new DataView(new ArrayBuffer(30));
             [[0, 0x04034b50, 4], [4, 20, 2], [14, crc, 4], [18, data.length, 4], [22, data.length, 4], [26, nameBytes.length, 2]]
                 .forEach(([at, value, size]) => size === 4 ? local.setUint32(at, value, true) : local.setUint16(at, value, true));
@@ -437,33 +685,69 @@ Naki.files = (function () {
         return new Blob([...chunks, ...central, new Uint8Array(end.buffer)]);
     }
 
-    function makeDocx(title, text) {
+    async function makeDocx(title, blocks) {
         const escape = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-        const paragraph = (s, bold, size) => `<w:p><w:r><w:rPr>${bold ? '<w:b/>' : ''}<w:sz w:val="${size}"/></w:rPr><w:t xml:space="preserve">${escape(s)}</w:t></w:r></w:p>`;
-        const body = [paragraph(title, true, 32), ...String(text).replace(/\r/g, '').split('\n').map(line => {
-            const heading = /^#{1,4}\s+/.test(line);
-            return paragraph(line.replace(/^#{1,4}\s+/, '').replace(/\*\*(.+?)\*\*/g, '$1'), heading, heading ? 26 : 22);
-        })].join('');
+        const run = (s, bold, size, italic) => `<w:r><w:rPr>${bold ? '<w:b/>' : ''}${italic ? '<w:i/>' : ''}<w:sz w:val="${size}"/></w:rPr><w:t xml:space="preserve">${escape(s)}</w:t></w:r>`;
+        const paragraph = (s, bold, size, { italic = false, center = false } = {}) =>
+            `<w:p>${center ? '<w:pPr><w:jc w:val="center"/></w:pPr>' : ''}${run(s, bold, size, italic)}</w:p>`;
+        const border = side => `<w:${side} w:val="single" w:sz="4" w:space="0" w:color="999999"/>`;
+        const table = rows => `<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/><w:tblBorders>${['top', 'left', 'bottom', 'right', 'insideH', 'insideV'].map(border).join('')}</w:tblBorders>` +
+            `<w:tblCellMar><w:left w:w="80" w:type="dxa"/><w:right w:w="80" w:type="dxa"/></w:tblCellMar></w:tblPr>` +
+            rows.map((row, r) => `<w:tr>${row.map(cell => `<w:tc><w:tcPr><w:tcW w:w="0" w:type="auto"/></w:tcPr>${paragraph(cell, r === 0, 20)}</w:tc>`).join('')}</w:tr>`).join('') + '</w:tbl><w:p/>';
+        const images = [];
+        const picture = image => {
+            images.push(image.bytes);
+            const n = images.length, cx = 5486400, cy = Math.round(cx * image.height / image.width);
+            return `<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="${cx}" cy="${cy}"/><wp:docPr id="${n}" name="Plot ${n}"/>` +
+                `<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+                `<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:nvPicPr><pic:cNvPr id="${n}" name="plot${n}.png"/><pic:cNvPicPr/></pic:nvPicPr>` +
+                `<pic:blipFill><a:blip r:embed="rIdImg${n}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm>` +
+                `<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>`;
+        };
+        const body = [paragraph(title, true, 32)];
+        for (const block of await renderBlocks(blocks, 'image/png')) {
+            if (block.image) {
+                body.push(picture(block.image));
+                if (block.spec.caption) body.push(paragraph(String(block.spec.caption), false, 20, { italic: true, center: true }));
+            } else if (block.type === 'table') body.push(table(block.rows));
+            else if (block.type === 'heading') body.push(paragraph(block.text, true, 26));
+            else body.push(paragraph(block.text, false, 22));
+        }
+        const rels = images.map((_, i) => `<Relationship Id="rIdImg${i + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/plot${i + 1}.png"/>`).join('');
         return makeZip([
-            ['[Content_Types].xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'],
+            ['[Content_Types].xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'],
             ['_rels/.rels', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'],
-            ['word/document.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${body}</w:body></w:document>`]
+            ['word/_rels/document.xml.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${rels}</Relationships>`],
+            ['word/document.xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" ' +
+                'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">' +
+                `<w:body>${body.join('')}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1134" w:right="1134" w:bottom="1134" w:left="1134" w:header="708" w:footer="708" w:gutter="0"/></w:sectPr></w:body></w:document>`],
+            ...images.map((bytes, i) => [`word/media/plot${i + 1}.png`, bytes])
         ]);
     }
 
-    // The answer as a file Coursera accepts for the part: PDF when the text fits a standard font, else DOCX, else TXT.
-    // allowed: the part's allowedFiles (["ALL"], ["PDF", "DOCX"], …); an empty list allows anything.
-    function makeFile(title, text, allowed = []) {
+    const plainText = blocks => blocks.map(block => block.type === 'table' ? block.rows.map(row => row.join('\t')).join('\n')
+        : block.type === 'plot' ? `[${block.spec.title || 'Plot'}]` : block.text).join('\n');
+
+    // The answer as a file Coursera accepts for the part. Plots and tables → DOCX (real tables, PNG charts); otherwise
+    // PDF when the text fits a standard PDF font, else DOCX, else TXT. allowed: the part's allowedFiles (["ALL"],
+    // ["PDF", "DOCX"], …), an empty list allows anything. name: the file name without extension (title by default).
+    async function makeFile(title, text, allowed = [], name = title) {
         const kinds = allowed.map(kind => String(kind).toUpperCase());
         const any = !kinds.length || kinds.some(kind => /ALL|ANY/.test(kind));
         const ok = pattern => any || kinds.some(kind => pattern.test(kind));
-        const base = (String(title).replace(/[^\p{L}\p{N}]+/gu, '_').replace(/^_+|_+$/g, '').slice(0, 60) || 'submission');
-        if (ok(/PDF/) && fitsPdf(`${title}\n${text}`)) return new File([makePdf(title, text)], `${base}.pdf`, { type: 'application/pdf' });
-        if (ok(/DOC|WORD|OFFICE/)) return new File([makeDocx(title, text)], `${base}.docx`, { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
-        if (ok(/TXT|TEXT|PLAIN/)) return new File([`${title}\n\n${text}`], `${base}.txt`, { type: 'text/plain' });
-        if (ok(/PDF/)) return new File([makePdf(title, text)], `${base}.pdf`, { type: 'application/pdf' }); // unsupported characters become "?"
+        const base = String(name).replace(/[^\p{L}\p{N}]+/gu, '_').replace(/^_+|_+$/g, '').slice(0, 60) || 'submission';
+        const blocks = parseBlocks(text);
+        const rich = blocks.some(block => block.type === 'plot' || block.type === 'table');
+        const fits = fitsPdf(`${title}\n${plainText(blocks)}`);
+        const docx = async () => new File([await makeDocx(title, blocks)], `${base}.docx`, { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+        const pdf = async () => new File([await makePdf(title, blocks)], `${base}.pdf`, { type: 'application/pdf' });
+        if (ok(/DOC|WORD|OFFICE/) && (rich || !fits)) return docx();
+        if (ok(/PDF/) && fits) return pdf();
+        if (ok(/DOC|WORD|OFFICE/)) return docx();
+        if (ok(/TXT|TEXT|PLAIN/)) return new File([`${title}\n\n${plainText(blocks)}`], `${base}.txt`, { type: 'text/plain' });
+        if (ok(/PDF/)) return pdf(); // unsupported characters become "?"
         return null;
     }
 
-    return { textOf, pdfText, officeText, makeFile, makePdf, makeDocx };
+    return { textOf, pdfText, officeText, makeFile, makePdf, makeDocx, parseBlocks, renderPlot, compile };
 })();

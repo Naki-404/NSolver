@@ -1156,6 +1156,8 @@
             .filter(entry => !['url', 'image'].includes(entry.kind));
         const context = await materialsFor(`${item.name} ${assignment.instructions} ${parts.map(entry => entry.prompt).join(' ')}`, 16000);
         const overview = parts.map((entry, i) => `Part ${i + 1}: ${entry.prompt.slice(0, 1500)}`).join('\n\n');
+        // The peer-review rubric, when the course shows it before submission: what the graders give points for.
+        const rubric = assignment.reviewParts.map(part => `- ${cmlText(part.prompt)}${optionsOf(part).length ? ` (${optionsOf(part).map(option => `${option.points ?? '?'} points: ${option.text}`).join('; ')})` : ''}`).join('\n');
         const answers = {}, errors = [];
         let done = 0;
         showRun(run, tr('autopilotPeerWrite', { title: item.name, done, total: parts.length }));
@@ -1164,7 +1166,12 @@
             const task = kind === 'options' || kind === 'yesNo'
                 ? `Choose the right option and answer with its number only:\n${options.map((option, i) => `${i}: ${option.text}`).join('\n')}`
                 : kind === 'file'
-                    ? `This answer becomes the document the student uploads for this part (PDF or Word). Structure it with "## " headings (one per sub-question), show the full working (reasoning, derivations, equations, intermediate results) and state each final answer clearly.`
+                    ? `This answer becomes the document the student uploads for this part (Word or PDF). Structure it with "## " headings (one per sub-question), show the full working (reasoning, derivations, equations, intermediate results) and state each final answer clearly. Tables: markdown (| a | b |).
+Every plot, graph or simulation result the task asks for must be in the document: write it as a block that is drawn into the document as a chart, right after the text about it:
+\`\`\`plot
+{"title": "Room temperature", "xLabel": "t", "yLabel": "T(t)", "xRange": [0, 6], "series": [{"label": "T(0) = 0, heater on", "expr": "90*(1 - exp(-t))"}, {"label": "T(0) = 120, switching", "segments": [{"from": 0, "to": 0.539, "expr": "120*exp(-t)"}, {"from": 0.539, "to": 1.232, "expr": "90 - 20*exp(-(t - 0.539))"}]}], "hlines": [{"y": 70, "label": "T = 70"}, {"y": 80, "label": "T = 80"}]}
+\`\`\`
+Series: "expr" (a formula in t over xRange or "from"/"to"), "segments" (piecewise: one segment per mode of a switching system, the exact solution in absolute time t), or "points": [[t, y], …] when there is no formula. Formulas: numbers, t, + - * / ^, parentheses, exp, log, sqrt, sin, cos, tan, abs, min, max, pi; always write "*". One plot per requested figure (several curves in one plot when they are compared). Compute every number carefully: the plots are graded against the answer key. Do not write that plots are attached separately.`
                     : `This answer goes into a text field. Answer completely and to the point.`;
             const text = await generateText(`You are a diligent student completing the peer-reviewed assignment "${item.name}" of an online course.
 Write the student's answer for ONE part of the assignment: complete, correct and well organised work that meets every
@@ -1184,7 +1191,10 @@ Course material excerpts (use them; the reviewers check against this course):
 ${context}
 >>>
 ` : ''}
-All parts of the assignment, for reference:
+${rubric ? `Grading rubric (meet every point that earns credit):
+${rubric.slice(0, 6000)}
+
+` : ''}All parts of the assignment, for reference:
 ${overview}
 
 Write the answer for this part only:
@@ -1198,6 +1208,16 @@ Reply with the answer itself, nothing before or after it.`).catch(error => { err
         }, () => showRun(run, tr('autopilotPeerWrite', { title: item.name, done: ++done, total: parts.length })));
         if (errors.length) throw new Error(errors[0]);
         return { title: item.name.slice(0, 120), parts: answers };
+    }
+
+    // The part's own heading ("Problem 1", "Task 2a"…) from its prompt, else "Part N".
+    function partLabel(part, index) {
+        const definition = part.prompt?.definition || {};
+        const html = definition.renderableHtmlWithMetadata?.renderableHtml || definition.value || '';
+        const heading = html.match(/<(h[1-6]|heading)\b[^>]*>([\s\S]*?)<\/\1>/i)?.[2];
+        const text = heading ? htmlToText(heading)
+            : cmlText(part.prompt).match(/^(problem|task|question|exercise|part|step|задача|задание|вопрос|упражнение)\s*#?\s*\d+[a-zа-я]?/i)?.[0];
+        return text && text.length <= 40 ? text : `Part ${index + 1}`;
     }
 
     // Uppy dashboard of the part: Add File → file input → Upload (when not automatic) → the file listed in the part.
@@ -1237,12 +1257,14 @@ Reply with the answer itself, nothing before or after it.`).catch(error => { err
         const manual = [];
         const title = document.getElementById('title') || document.querySelector('input[aria-label="Project Title"]');
         if (title) setNativeValue(title, answer.title);
-        for (const part of assignment.submissionParts) {
+        for (const [index, part] of assignment.submissionParts.entries()) {
             const kind = partKind(part);
             const value = answer.parts[part.id];
             let ok = false;
             if (kind === 'file' && value) {
-                const file = Naki.files.makeFile(answer.title, String(value), part.details?.definition?.allowedFiles || []);
+                // One file per part, named after it: "Problem_1.docx", "Problem_2.docx"…
+                const label = partLabel(part, index);
+                const file = await Naki.files.makeFile(`${answer.title} — ${label}`, String(value), part.details?.definition?.allowedFiles || [], label);
                 if (file) {
                     showRun(run, tr('autopilotPeerUpload', { name: file.name }));
                     ok = await uploadFile(part.id, file);
