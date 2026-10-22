@@ -731,7 +731,8 @@
         retry: /^(try again|retry|retake|retake quiz|retake assignment|start new attempt|new attempt|повторить|повторить попытку|пройти снова|начать заново)$/i,
         submit: /^(submit|submit quiz|submit assignment|отправить|отправить тест)$/i
     };
-    const HONOR_TEXT = /honor code|isn.t my own|not my own|understand that submitting|кодекс|не являющ|моей собственной/i;
+    // Quizzes: "…work that isn't my own…"; peer-reviewed assignments: "I, <name>, understand and agree."
+    const HONOR_TEXT = /honor code|isn.t my own|not my own|understand that submitting|understand and agree|кодекс|не являющ|моей собственной|понимаю и соглас/i;
 
     // A stopped run is remembered by id, so a step that was already in flight cannot save it back.
     const STOP_KEY = 'nakiAutopilotStop';
@@ -1124,27 +1125,54 @@
         return true;
     }
 
-    async function generateJson(prompt) {
+    // Free text from the model (written work has formulas, quotes and backslashes that break JSON answers).
+    async function generateText(prompt) {
         const settings = state.settings;
         const { text } = await ModelProvider.generateContent({ provider: settings.provider, apiKey: Naki.activeKey(settings), modelId: Naki.activeModel(settings), lang: settings.lang, prompt });
-        return ModelProvider.parseJsonResponse(text, settings.lang);
+        return String(text || '').replace(/<think>[\s\S]*?<\/think>/gi, '').replace(/^\s*```[\w-]*\n([\s\S]*?)\n```\s*$/, '$1').trim();
     }
+
+    // "=== <key> ===" lines followed by the text of that section.
+    function parseSections(text) {
+        const sections = {};
+        let key = null;
+        for (const line of text.split('\n')) {
+            const marker = line.match(/^\s*={3,}\s*([^=]+?)\s*={3,}\s*$/);
+            if (marker) sections[key = marker[1].trim()] = '';
+            else if (key !== null) sections[key] += line + '\n';
+        }
+        for (const name of Object.keys(sections)) sections[name] = sections[name].trim();
+        return sections;
+    }
+
+    const optionNumber = value => Number(String(value).match(/-?\d+/)?.[0] ?? NaN);
 
     const materialsFor = async (text, limit) => state.settings.courseContext
         ? courseExcerptsFor([{ question: text }], null, limit).catch(() => '') : '';
 
-    async function writeSubmission(item, assignment) {
-        const parts = assignment.submissionParts.map(part => ({
-            id: part.id, kind: partKind(part), prompt: cmlText(part.prompt),
-            ...(['options', 'yesNo'].includes(partKind(part)) ? { options: optionsOf(part).map((option, i) => ({ i, text: option.text })) } : {})
-        }));
-        const context = await materialsFor(`${item.name} ${assignment.instructions} ${parts.map(part => part.prompt).join(' ')}`, 16000);
-        const prompt = `You are a diligent student completing the peer-reviewed assignment "${item.name}" of an online course.
-Write the student's submission: complete, specific and well organised work that meets every requirement and review
-criterion below. Use the language of the assignment. Write it as the student's own work: no mention of AI, no
-placeholders such as [Your Name]. When the task asks for screenshots, files or results of hands-on work that cannot be
-attached as text, describe the steps taken and what they show, clearly and concretely, without inventing exact
-evidence such as hashes, timestamps or file names.
+    // One request per part (a homework of several problems is too long for one answer), several at a time.
+    async function writeSubmission(run, item, assignment) {
+        const parts = assignment.submissionParts.map(part => ({ part, kind: partKind(part), prompt: cmlText(part.prompt) }))
+            .filter(entry => !['url', 'image'].includes(entry.kind));
+        const context = await materialsFor(`${item.name} ${assignment.instructions} ${parts.map(entry => entry.prompt).join(' ')}`, 16000);
+        const overview = parts.map((entry, i) => `Part ${i + 1}: ${entry.prompt.slice(0, 1500)}`).join('\n\n');
+        const answers = {}, errors = [];
+        let done = 0;
+        showRun(run, tr('autopilotPeerWrite', { title: item.name, done, total: parts.length }));
+        await runLimited(parts, 3, async ({ part, kind, prompt }) => {
+            const options = optionsOf(part);
+            const task = kind === 'options' || kind === 'yesNo'
+                ? `Choose the right option and answer with its number only:\n${options.map((option, i) => `${i}: ${option.text}`).join('\n')}`
+                : kind === 'file'
+                    ? `This answer becomes the document the student uploads for this part (PDF or Word). Structure it with "## " headings (one per sub-question), show the full working (reasoning, derivations, equations, intermediate results) and state each final answer clearly.`
+                    : `This answer goes into a text field. Answer completely and to the point.`;
+            const text = await generateText(`You are a diligent student completing the peer-reviewed assignment "${item.name}" of an online course.
+Write the student's answer for ONE part of the assignment: complete, correct and well organised work that meets every
+requirement and review criterion. Use the language of the assignment. Write it as the student's own work: no mention
+of AI, no placeholders such as [Your Name], no remarks about the format. Write formulas in plain text with Unicode
+symbols (for example z₁(t) = z₁(0) + v·r₁·t, ż = Az + Bu, x ∈ ℝ², √, ≤, θ), not LaTeX. When the task asks for
+screenshots, simulations or other hands-on results that cannot be shown as text, describe what was done and what it
+shows, without inventing exact evidence such as hashes, timestamps or file names.
 
 Assignment instructions and review criteria:
 <<<
@@ -1156,15 +1184,20 @@ Course material excerpts (use them; the reviewers check against this course):
 ${context}
 >>>
 ` : ''}
-Submission parts (JSON):
-${JSON.stringify(parts)}
+All parts of the assignment, for reference:
+${overview}
 
-Answer with JSON only: {"title": "<project title, under 80 characters>", "parts": {"<part id>": <answer>}}.
-For a "text" or "file" part the answer is the full text (a file part becomes a document: use "## " headings and
-paragraphs, roughly 400–900 words unless the part asks otherwise). For an "options" or "yesNo" part the answer is the
-option index "i". Skip "url" and "image" parts.`;
-        const answer = await generateJson(prompt);
-        return { title: String(answer?.title || item.name).slice(0, 120), parts: answer?.parts || {} };
+Write the answer for this part only:
+<<<
+${prompt}
+>>>
+${task}
+Reply with the answer itself, nothing before or after it.`).catch(error => { errors.push(error.message); throw error; });
+            if (!text) errors.push('empty answer');
+            answers[part.id] = text;
+        }, () => showRun(run, tr('autopilotPeerWrite', { title: item.name, done: ++done, total: parts.length })));
+        if (errors.length) throw new Error(errors[0]);
+        return { title: item.name.slice(0, 120), parts: answers };
     }
 
     // Uppy dashboard of the part: Add File → file input → Upload (when not automatic) → the file listed in the part.
@@ -1173,8 +1206,10 @@ option index "i". Skip "url" and "image" parts.`;
             findButton(/^(add file|upload file|добавить файл|загрузить файл)$/i);
         if (!button) return false;
         button.click();
-        if (!await waitFor(() => document.querySelector('.uppy-Dashboard input[type="file"], [role="dialog"] input[type="file"]'), 8000)) return false;
-        const input = document.querySelector('.uppy-Dashboard input[type="file"], [role="dialog"] input[type="file"]');
+        // The dashboard has two inputs: files and a folder (webkitdirectory).
+        const FILE_INPUT = '.uppy-Dashboard input[type="file"]:not([webkitdirectory]), [role="dialog"] input[type="file"]:not([webkitdirectory])';
+        if (!await waitFor(() => document.querySelector(FILE_INPUT), 8000)) return false;
+        const input = document.querySelector(FILE_INPUT);
         const transfer = new DataTransfer();
         transfer.items.add(file);
         input.files = transfer.files;
@@ -1182,9 +1217,11 @@ option index "i". Skip "url" and "image" parts.`;
         await sleep(1500);
         const upload = findButton(/^(upload|upload \d+ files?|загрузить|загрузить \d+ файл\S*)$/i);
         if (upload) upload.click();
-        // Uploaded: the part lists the file outside the upload dialog.
-        const listed = () => [...document.querySelectorAll('a, span, p, div, li')].some(el => !el.childElementCount &&
-            el.textContent.includes(file.name) && !el.closest('.uppy-Dashboard, [role="dialog"], [aria-modal="true"]'));
+        // Uploaded (Coursera uploads at once and closes the dialog): the part lists the file outside the dialog,
+        // with "Open uploaded file <name>" and "Upload completed".
+        const scope = document.getElementById(partId) || document;
+        const listed = () => [...scope.querySelectorAll('a, span, p, div, li')].some(el => !el.closest('.uppy-Dashboard, [role="dialog"], [aria-modal="true"]') &&
+            ((el.getAttribute('aria-label') || '').includes(file.name) || (!el.childElementCount && el.textContent.includes(file.name))));
         await waitFor(listed, 60000, 500);
         const dashboard = document.querySelector('.uppy-Dashboard');
         if (isShown(dashboard)) {
@@ -1196,8 +1233,7 @@ option index "i". Skip "url" and "image" parts.`;
 
     async function submitPeer(run, item) {
         const assignment = await peerAssignment(run, item);
-        showRun(run, tr('autopilotPeerWrite', { title: item.name }));
-        const answer = await writeSubmission(item, assignment);
+        const answer = await writeSubmission(run, item, assignment);
         const manual = [];
         const title = document.getElementById('title') || document.querySelector('input[aria-label="Project Title"]');
         if (title) setNativeValue(title, answer.title);
@@ -1212,17 +1248,20 @@ option index "i". Skip "url" and "image" parts.`;
                     ok = await uploadFile(part.id, file);
                 }
             } else if ((kind === 'options' || kind === 'yesNo') && value !== undefined) {
-                ok = chooseOption(part.id, optionsOf(part), Number(value));
+                ok = chooseOption(part.id, optionsOf(part), optionNumber(value));
             } else if (kind === 'text' && value) {
                 ok = fillText(part.id, String(value));
             }
-            if (!ok && part.details?.definition?.required !== false) manual.push(cmlText(part.prompt).slice(0, 60) || kind);
+            // Optional parts may stay empty, but a part with an answer that did not go in means the work is incomplete.
+            if (!ok && (value || part.details?.definition?.required !== false)) manual.push(cmlText(part.prompt).slice(0, 60) || kind);
             await sleep(300);
         }
         if (manual.length) return { ok: false, note: tr('peerNoteManual', { parts: manual.join('; ') }) };
-        await sleep(1000);
+        // Honor Code on the page ("I, <name>, understand and agree."): Submit stays disabled until it is checked.
+        acceptHonorCode();
+        await waitFor(() => findButton(/^(submit|отправить)$/i), 8000);
         const submit = findButton(/^(submit|отправить)$/i);
-        if (!submit) return { ok: false, note: tr('autopilotStuck', { step: 'Submit' }) };
+        if (!submit) return { ok: false, note: tr('peerNoteSubmitDisabled') };
         submit.click();
         // Confirmation: "I understand…" checkbox (and sometimes the legal name), then Submit.
         await waitFor(() => visibleDialog()?.querySelector('button'), 8000);
@@ -1293,16 +1332,17 @@ ${submission.text}
 Rubric (JSON):
 ${JSON.stringify(parts)}
 
-Answer with JSON only: {"<rubric id>": <answer>}, where the answer is the option index "i" for an "options" item and
-the feedback text for a "text" item.`;
-        const answer = await generateJson(prompt);
+Answer in exactly this format, one section per rubric item, nothing else:
+=== ITEM <rubric id> ===
+<the option index "i" for an "options" item, or the feedback text for a "text" item>`;
+        const answer = parseSections(await generateText(prompt));
         let filled = 0;
         for (const part of parts) {
-            const value = answer?.[part.id];
-            if (value === undefined || value === null) continue;
+            const value = answer[`ITEM ${part.id}`] ?? answer[part.id];
+            if (!value) continue;
             const ok = part.kind === 'options'
-                ? chooseOption(part.id, part.options, Number(value))
-                : fillText(part.id, String(value));
+                ? chooseOption(part.id, part.options, optionNumber(value))
+                : fillText(part.id, value);
             if (ok) filled++;
             await sleep(200);
         }
@@ -1343,14 +1383,18 @@ the feedback text for a "text" item.`;
                 await setPeerPhase(run, 'peer-review');
                 return;
             }
-            // A step that throws is retried by the loop: at most twice, each try costs a request to the model.
+            // A failed try (the model did not answer, a timeout…) is tried once more; each try costs requests to the model.
             run.peer.tries = (run.peer.tries || 0) + 1;
+            run.phaseAt = Date.now();
             await saveRun(run);
-            if (run.peer.tries > 2) {
-                await nextItem(run, { name: item.name, pass: false, percent: null, note: tr('peerNoteNotSubmitted') });
+            let result;
+            try {
+                result = await submitPeer(run, item);
+            } catch (error) {
+                console.warn('[Naki] Peer submission failed:', error);
+                if (run.peer.tries >= 2) await nextItem(run, { name: item.name, pass: false, percent: null, note: `${tr('peerNoteNotSubmitted')}: ${error.message}` });
                 return;
             }
-            const result = await submitPeer(run, item);
             if (!result.ok) {
                 await nextItem(run, { name: item.name, pass: false, percent: null, note: result.note });
                 return;

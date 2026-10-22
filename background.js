@@ -1,7 +1,7 @@
 // Service worker: AI API proxy, NetAcad hotkey relay and script injection into already-open Coursera / NetAcad tabs. NSolver, made by Naki — https://github.com/Naki-404/NSolver
 importScripts('shared.js');
 
-const API_TIMEOUT_MS = 120000;
+const API_TIMEOUT_MS = 300000; // long answers (peer-reviewed assignments) can take minutes
 // Same list as the netacad.js content script in manifest.json (netacad.net: legacy exams, skillsforall.com: merged into NetAcad).
 const NETACAD_MATCHES = chrome.runtime.getManifest().content_scripts.find(entry => entry.js.includes('netacad.js')).matches;
 const ALLOWED_API_PREFIXES = [
