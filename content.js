@@ -729,7 +729,9 @@
     const BUTTONS = {
         start: /^(start|start quiz|start assignment|resume|resume assignment|continue|continue assignment|начать|начать тест|продолжить|возобновить)$/i,
         retry: /^(try again|retry|retake|retake quiz|retake assignment|start new attempt|new attempt|повторить|повторить попытку|пройти снова|начать заново)$/i,
-        submit: /^(submit|submit quiz|submit assignment|отправить|отправить тест)$/i
+        submit: /^(submit|submit quiz|submit assignment|отправить|отправить тест)$/i,
+        // The confirmation after Submit ("Ready to submit?", "You have unanswered questions…").
+        confirm: /^(submit|submit quiz|submit assignment|submit anyway|submit now|yes,? submit|confirm|confirm submission|yes|ok|отправить|отправить тест|всё равно отправить|подтвердить|да)$/i
     };
     // Quizzes: "…work that isn't my own…"; peer-reviewed assignments: "I, <name>, understand and agree."
     const HONOR_TEXT = /honor code|isn.t my own|not my own|understand that submitting|understand and agree|кодекс|не являющ|моей собственной|понимаю и соглас/i;
@@ -765,6 +767,28 @@
     function findButton(pattern, scope = document) {
         return [...scope.querySelectorAll('button, a[role="button"], [role="button"]')]
             .find(el => isShown(el) && !el.disabled && el.getAttribute('aria-disabled') !== 'true' && pattern.test(buttonText(el)));
+    }
+
+    // Open dialogs with content. Every Coursera page keeps an empty role="dialog" (the AI assistant panel), so the first
+    // [role="dialog"] of the document is usually not the confirmation.
+    const shownDialogs = () => [...document.querySelectorAll('[role="dialog"], [role="alertdialog"], [aria-modal="true"], .rc-Modal, .cds-Dialog-dialog')]
+        .filter(dialog => isShown(dialog) && (dialog.innerText || '').trim());
+
+    // Waits for a confirmation dialog and presses its button (checking "I understand…" boxes in it first).
+    async function confirmInDialog(pattern, timeoutMs) {
+        const end = Date.now() + timeoutMs;
+        do {
+            for (const dialog of shownDialogs()) {
+                const button = findButton(pattern, dialog);
+                if (!button) continue;
+                for (const box of dialog.querySelectorAll('input[type="checkbox"]')) if (!box.checked) (box.labels?.[0] || box).click();
+                await sleep(300);
+                (findButton(pattern, dialog) || button).click();
+                return true;
+            }
+            await sleep(300);
+        } while (Date.now() < end);
+        return false;
     }
 
     // /learn/<course>/item/<id> opens any item type on its own route; every route keeps the item id in the path.
@@ -981,15 +1005,16 @@
         run.phase = 'starting';
         await saveRun(run);
         button.click();
-        await sleep(1500);
-        // Timed quizzes ask for confirmation in a dialog.
-        const dialog = document.querySelector('[role="dialog"], .rc-Modal');
-        const confirm = dialog && (findButton(BUTTONS.start, dialog) || findButton(BUTTONS.retry, dialog));
-        if (confirm) confirm.click();
+        // Timed quizzes and new attempts ask for confirmation in a dialog.
+        await confirmInDialog(new RegExp(`${BUTTONS.start.source}|${BUTTONS.retry.source}`, 'i'), 3000);
     }
 
     async function attemptStep(run, item) {
-        if (run.phase === 'submitting' || run.phase === 'submitted') return; // waiting for the feedback page
+        if (run.phase === 'submitting' || run.phase === 'submitted') {
+            // Waiting for the feedback page; a confirmation that showed up late is still answered.
+            await confirmInDialog(BUTTONS.confirm, 500);
+            return;
+        }
         if (!state.questions.length) {
             requestReplay();
             return; // questions arrive with the attempt data; STUCK_MS ends the wait
@@ -1010,10 +1035,8 @@
         run.phaseAt = Date.now();
         await saveRun(run);
         submit.click();
-        await sleep(1500);
-        const dialog = document.querySelector('[role="dialog"], .rc-Modal');
-        const confirm = dialog && findButton(BUTTONS.submit, dialog);
-        if (confirm) confirm.click();
+        // "Ready to submit?" / "You have unanswered questions": the dialog's own Submit.
+        await confirmInDialog(BUTTONS.confirm, 8000);
         run.phase = 'submitted';
         run.phaseAt = Date.now();
         await saveRun(run);
@@ -1051,8 +1074,6 @@
         const definition = content?.definition || {};
         return blockText(definition.renderableHtmlWithMetadata?.renderableHtml || definition.value || '').trim();
     };
-    const visibleDialog = () => [...document.querySelectorAll('[role="dialog"], [aria-modal="true"], .rc-Modal')]
-        .find(dialog => isShown(dialog) && (dialog.innerText || '').trim());
 
     async function peerAssignment(run, item) {
         const data = await getJson(`${API}/onDemandPeerAssignmentInstructions.v1/?q=latest&userId=${run.userId}&courseId=${run.courseId}&itemId=${item.id}` +
@@ -1286,17 +1307,12 @@ Reply with the answer itself, nothing before or after it.`).catch(error => { err
         if (!submit) return { ok: false, note: tr('peerNoteSubmitDisabled') };
         submit.click();
         // Confirmation: "I understand…" checkbox (and sometimes the legal name), then Submit.
-        await waitFor(() => visibleDialog()?.querySelector('button'), 8000);
-        const dialog = visibleDialog();
-        if (dialog) {
-            for (const box of dialog.querySelectorAll('input[type="checkbox"]')) if (!box.checked) (box.labels?.[0] || box).click();
-            const name = dialog.querySelector('input[type="text"], input:not([type])');
-            const fullName = readUserData()?.fullName;
-            if (name && !name.value && fullName) setNativeValue(name, fullName);
-            await sleep(500);
-            const confirm = findButton(/^(submit|confirm|yes, submit|отправить|подтвердить)$/i, dialog);
-            if (confirm) confirm.click();
-        }
+        const confirmation = () => shownDialogs().find(dialog => findButton(BUTTONS.confirm, dialog));
+        await waitFor(confirmation, 8000);
+        const name = confirmation()?.querySelector('input[type="text"], input:not([type])');
+        const fullName = readUserData()?.fullName;
+        if (name && !name.value && fullName) setNativeValue(name, fullName);
+        await confirmInDialog(BUTTONS.confirm, 2000);
         return { ok: true };
     }
 
@@ -1373,10 +1389,7 @@ Answer in exactly this format, one section per rubric item, nothing else:
         const submit = findButton(/^(submit review|отправить отзыв|отправить рецензию)$/i);
         if (!submit) return false;
         submit.click();
-        await sleep(2500);
-        const dialog = visibleDialog();
-        const confirm = dialog && findButton(/^(submit|submit review|confirm|отправить|подтвердить)$/i, dialog);
-        if (confirm) confirm.click();
+        await confirmInDialog(/^(submit|submit review|confirm|yes|отправить|отправить отзыв|подтвердить|да)$/i, 3000);
         return true;
     }
 
