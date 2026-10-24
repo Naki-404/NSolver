@@ -4,6 +4,12 @@
     if (window.__nakiInterceptorInstalled) return;
     window.__nakiInterceptorInstalled = true;
 
+    // During an autopilot run (content.js sets data-naki-autopilot) a "Leave site?" prompt would stop it on the page:
+    // this listener comes first (document_start) and keeps the page's own beforeunload handlers from running.
+    window.addEventListener('beforeunload', event => {
+        if (document.documentElement.dataset.nakiAutopilot === '1') event.stopImmediatePropagation();
+    }, true);
+
     const CHANNEL = 'naki-coursera';
     const WATCHED = [
         { kind: 'quizState', test: url => url.includes('opname=querystate') },

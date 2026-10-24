@@ -438,13 +438,12 @@
 
     const MATERIALS_PREFIX = 'nakiMaterials:';
 
+    // Sizes only (getBytesInUse): the records themselves can be tens of megabytes and would slow the window down.
     async function renderMaterialsSummary() {
         const { nakiMaterialsIndex: index = [] } = await chrome.storage.local.get('nakiMaterialsIndex');
-        const records = index.length ? await chrome.storage.local.get(index.map(slug => MATERIALS_PREFIX + slug)) : {};
-        const values = Object.values(records).filter(record => record && Array.isArray(record.docs));
-        const bytes = values.reduce((sum, record) => sum + JSON.stringify(record).length, 0);
+        const bytes = index.length ? await chrome.storage.local.getBytesInUse(index.map(slug => MATERIALS_PREFIX + slug)) : 0;
         const size = bytes > 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;
-        $('materialsSummary').textContent = values.length ? tr('materialsSummary', { courses: values.length, size }) : tr('materialsEmpty');
+        $('materialsSummary').textContent = index.length && bytes ? tr('materialsSummary', { courses: index.length, size }) : tr('materialsEmpty');
         $('materialsSummary').title = $('materialsSummary').textContent;
     }
 
@@ -596,7 +595,6 @@
     // ------------------------------------------------------------------ init
 
     async function reload() {
-        renderMaterialsSummary().catch(() => { });
         settings = await Naki.loadSettings();
         const { modelLists: stored } = await chrome.storage.local.get('modelLists');
         modelLists = stored && typeof stored === 'object' ? stored : {};
@@ -608,12 +606,26 @@
         renderHotkeys();
     }
 
+    // Only settings changes re-render the window; the autopilot and the notebooks write their own state every few seconds.
+    const SETTINGS_KEYS = new Set([...Object.keys(Naki.DEFAULT_SETTINGS), 'modelLists']);
+    let summaryTimer = null;
     chrome.storage.onChanged.addListener((changes, area) => {
-        if (area === 'local') reload();
+        if (area !== 'local') return;
+        const keys = Object.keys(changes);
+        if (keys.some(key => SETTINGS_KEYS.has(key))) reload();
+        if (keys.some(key => key.startsWith(MATERIALS_PREFIX) || key === 'nakiMaterialsIndex')) {
+            clearTimeout(summaryTimer);
+            summaryTimer = setTimeout(() => renderMaterialsSummary().catch(() => { }), 500);
+        }
     });
 
+    // The window is drawn at once with the default texts; stored settings, status and model lists follow.
+    applyTranslations();
+    renderSettings();
+    renderHotkeys();
     reload().then(() => {
         refreshStatus();
-        refreshModelsIfStale();
+        renderMaterialsSummary().catch(() => { });
+        setTimeout(refreshModelsIfStale, 300);
     });
 })();

@@ -6,7 +6,7 @@
 
 Расширение для Chrome, которое решает тесты Coursera и Cisco NetAcad с помощью ИИ и отмечает лекции и материалы Coursera пройденными.
 
-**made by [Naki](https://github.com/Naki-404/NSolver)** · Manifest V3 · v2.13.0 · [English](#english)
+**made by [Naki](https://github.com/Naki-404/NSolver)** · Manifest V3 · v2.13.1 · [English](#english)
 
 </div>
 

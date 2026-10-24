@@ -207,12 +207,18 @@ Answer with one section per TODO cell you change (likely ${owners.join(', ')}), 
                 toast(tr('labsDone', { n: changes.length }) + errors, broken.length ? 'info' : 'success', 15000);
                 return { ok: !broken.length, note: errors };
             }
-            if (!status.canSubmit) {
+            // The Submit Assignment button exists only in the notebook embedded in the Coursera page, and only once
+            // the kernel and the submission config are ready (labs-main waits for it).
+            if (window === window.top && !status.canSubmit) {
                 toast(tr('labsDone', { n: changes.length }) + errors + tr('labsNoSubmit'), 'info', 20000);
                 return { ok: false, note: tr('labsNoSubmit').trim() };
             }
             toast(tr('labsSubmitting'));
-            const sent = await askMain('submit', 150000);
+            const sent = await askMain('submit', 240000);
+            if (sent?.message === 'no submit button') {
+                toast(tr('labsDone', { n: changes.length }) + errors + tr('labsNoSubmit'), 'error', 20000);
+                return { ok: false, note: tr('labsNoSubmit').trim() };
+            }
             const message = sent?.message || '';
             toast(tr('labsSubmitted', { message }) + errors, sent?.submitted ? 'success' : 'error', 20000);
             return { ok: !!sent?.submitted, submitted: !!sent?.submitted, note: [message, errors].filter(Boolean).join(' ') };
@@ -239,6 +245,7 @@ Answer with one section per TODO cell you change (likely ${owners.join(', ')}), 
             if (tries < 60) setTimeout(() => takeOverLab(tries + 1), 3000); // the notebook and its kernel are still loading
             return;
         }
+        document.documentElement.dataset.nakiAutopilot = '1'; // see labs-main.js: no "Leave site?" for the autopilot
         labRun = { ...lab, state: 'working', at: Date.now() };
         await chrome.storage.local.set({ [LAB_KEY]: labRun });
         const result = await solveNotebook({ submit: true });

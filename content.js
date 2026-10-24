@@ -875,21 +875,46 @@
         run.index++;
         run.attempt = 0;
         delete run.peer;
+        delete run.submitTries;
         run.phase = 'open';
         run.phaseAt = Date.now();
         await saveRun(run);
     }
 
+    const SUMMARY_KEY = 'nakiAutopilotSummary'; // the final summary, shown again after the page changes
+
     async function finishRun(run) {
         await clearRun();
         const passed = run.results.filter(result => result.pass).length;
         const failed = run.results.filter(result => !result.pass);
-        const details = failed.map(result => `${result.name}: ${result.percent ?? '?'}%${result.note ? ` (${result.note})` : ''}`).join('; ');
-        showRun(null, tr('autopilotCourseraDone', { passed, failed: failed.length }) + (details ? ` ${details}` : ''), failed.length ? 'info' : 'success', 20000);
+        const details = failed.map(result => `${result.name}${result.percent != null ? `: ${result.percent}%` : ''}${result.note ? ` (${result.note})` : ''}`).join('; ');
+        const message = tr('autopilotCourseraDone', { passed, failed: failed.length }) + (details ? ` ${details}` : '');
+        console.log('[Naki] Coursera autopilot finished:', run.results);
+        markAutopilot(false);
+        if (onLabPage()) {
+            // Back from the notebook to the course page; the summary is shown there.
+            await chrome.storage.local.set({ [SUMMARY_KEY]: { message, type: failed.length ? 'info' : 'success', at: Date.now() } });
+            location.assign(`https://www.coursera.org/learn/${run.slug}/home/welcome`);
+            return;
+        }
+        showRun(null, message, failed.length ? 'info' : 'success', 20000);
         runToast = null;
         state.autopilot = false;
-        console.log('[Naki] Coursera autopilot finished:', run.results);
     }
+
+    async function showStoredSummary() {
+        const { [SUMMARY_KEY]: summary } = await chrome.storage.local.get(SUMMARY_KEY);
+        if (!summary) return;
+        await chrome.storage.local.remove(SUMMARY_KEY);
+        if (Date.now() - summary.at < 120000) toast(summary.message, summary.type, 20000);
+    }
+
+    // While a run is going, pages must not stop it with "Leave site?" (the notebook frame, the lab page):
+    // interceptor.js drops beforeunload handlers when this attribute is set.
+    const markAutopilot = on => {
+        if (on) document.documentElement.dataset.nakiAutopilot = '1';
+        else delete document.documentElement.dataset.nakiAutopilot;
+    };
 
     // only: the id of one item to do (the peer-reviewed assignment open now) instead of the whole course.
     async function startAutopilot({ only = null } = {}) {
@@ -940,6 +965,7 @@
         try {
             const run = await loadRun();
             state.autopilot = !!run;
+            markAutopilot(!!run);
             if (!run || run.slug !== courseSlug()) return;
             const item = run.items[run.index];
             if (!item) {
@@ -1003,6 +1029,7 @@
         state.questionsSignature = '';
         if (run.phase !== 'starting') {
             run.attempt++; // a repeated click on the same attempt is not a new attempt
+            delete run.submitTries;
             run.phaseAt = Date.now();
         }
         run.phase = 'starting';
@@ -1015,7 +1042,24 @@
     async function attemptStep(run, item) {
         if (run.phase === 'submitting' || run.phase === 'submitted') {
             // Waiting for the feedback page; a confirmation that showed up late is still answered.
-            await confirmInDialog(BUTTONS.confirm, 500);
+            if (await confirmInDialog(BUTTONS.confirm, 500)) return;
+            // Still on the attempt a while later: the Submit did not go through (Honor Code, name, a dialog that
+            // closed). Try again, a few times.
+            if (Date.now() - run.phaseAt < 15000) return;
+            run.submitTries = (run.submitTries || 0) + 1;
+            if (run.submitTries > 3) {
+                await nextItem(run, { name: item.name, pass: false, percent: null, note: tr('autopilotStuck', { step: 'Submit' }) });
+                return;
+            }
+            run.phaseAt = Date.now();
+            await saveRun(run);
+            acceptHonorCode();
+            await sleep(500);
+            const again = findButton(BUTTONS.submit);
+            if (again) {
+                again.click();
+                await confirmInDialog(BUTTONS.confirm, 8000);
+            }
             return;
         }
         if (!state.questions.length) {
@@ -1115,7 +1159,7 @@
             showRun(run, tr('labsGrading', { title: item.name }));
         }
         const passed = (await fetchCompletedItems(run.userId, run.courseId)).has(item.id);
-        if (passed || Date.now() - run.phaseAt > 3 * 60 * 1000) {
+        if (passed || Date.now() - run.phaseAt > 2 * 60 * 1000) {
             await chrome.storage.local.remove(LAB_KEY);
             await nextItem(run, { name: item.name, pass: passed, percent: null, note: passed ? '' : `${tr('labsNoGrade')} ${lab.note || ''}`.trim() });
         } else {
@@ -1619,7 +1663,7 @@ Answer in exactly this format, one section per rubric item, nothing else:
     Naki.loadSettings().then(settings => {
         state.settings = settings;
         requestReplay();
-        loadRun().then(run => { if (run) runLoop(); }); // resume a quiz autopilot run after a page load
+        loadRun().then(run => { if (run) runLoop(); else showStoredSummary(); }); // resume a quiz autopilot run after a page load
     });
     console.log('[Naki] NSolver loaded — made by Naki: https://github.com/Naki-404/NSolver');
 })();

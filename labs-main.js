@@ -6,6 +6,12 @@
     if (window.__nakiLabsMain) return;
     window.__nakiLabsMain = true;
 
+    // A notebook handed over by the autopilot (labs.js sets data-naki-autopilot) must not ask "Leave site?" when the
+    // autopilot moves on; Jupyter asks while the notebook is dirty or the kernel is busy.
+    window.addEventListener('beforeunload', event => {
+        if (document.documentElement.dataset.nakiAutopilot === '1') event.stopImmediatePropagation();
+    }, true);
+
     const CHANNEL = 'naki-labs-main';
     const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     const ANSI = /\u001b\[[0-9;]*m/g;
@@ -76,8 +82,14 @@
     }
 
     // "Submit Assignment": a dialog "Submission Status" shows "Submitting ..." and then what the grader client printed.
+    // The extension adds the button only after the kernel is ready and Coursera's submission config has arrived.
     async function submit() {
-        const button = document.getElementById('submit-notebook-button');
+        let button = null;
+        for (let i = 0; i < 90 && !button; i++) {
+            const found = document.getElementById('submit-notebook-button');
+            if (found && found.getClientRects().length) button = found;
+            else await sleep(1000);
+        }
         if (!button) return { submitted: false, message: 'no submit button' };
         button.click();
         let message = '';
