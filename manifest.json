@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "NSolver: Coursera & NetAcad Solver / AutoPass",
   "short_name": "NSolver",
-  "version": "2.12.1",
+  "version": "2.13.0",
   "description": "NSolver — Coursera & Cisco NetAcad Solver / AutoPass by Naki: AI quiz solver (OctavAPI, Claude, ChatGPT, Gemini), hotkeys, skipping.",
   "author": "Naki",
   "homepage_url": "https://github.com/Naki-404/NSolver",
@@ -15,6 +15,7 @@
   ],
   "host_permissions": [
     "https://www.coursera.org/*",
+    "https://*.labs.coursera.org/*",
     "*://*.netacad.com/*",
     "*://*.netacad.net/*",
     "*://*.skillsforall.com/*",
@@ -91,6 +92,27 @@
         "netacad-main.js"
       ],
       "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://*.labs.coursera.org/*"
+      ],
+      "js": [
+        "shared.js",
+        "model-provider.js",
+        "labs.js"
+      ],
+      "all_frames": true
+    },
+    {
+      "matches": [
+        "https://*.labs.coursera.org/*"
+      ],
+      "js": [
+        "labs-main.js"
+      ],
+      "world": "MAIN",
+      "all_frames": true
     }
   ]
 }

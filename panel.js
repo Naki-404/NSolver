@@ -71,6 +71,10 @@
                         <option value="3" data-i18n="autopilotRetakes3"></option>
                     </select>
                 </div>
+                <div class="row" id="autopilotProgrammingRow">
+                    <label class="label-text" for="autopilotProgramming"><span data-i18n="autopilotProgramming"></span><small data-i18n="autopilotProgrammingHint"></small></label>
+                    <label class="switch"><input type="checkbox" id="autopilotProgramming"><span class="track"></span></label>
+                </div>
                 <div class="row" id="autopilotPeerRow">
                     <label class="label-text" for="autopilotPeer"><span data-i18n="autopilotPeer"></span><small data-i18n="autopilotPeerHint"></small></label>
                     <label class="switch"><input type="checkbox" id="autopilotPeer"><span class="track"></span></label>
@@ -232,6 +236,7 @@
         $('materialsLoad').hidden = !site;
         $('autoSolveRow').hidden = netacad;
         $('autopilotPeerRow').hidden = netacad;
+        $('autopilotProgrammingRow').hidden = netacad;
         $('skipDiscussionsRow').hidden = netacad;
         $('netacadSkipHint').hidden = !netacad;
         $('netacadCard').hidden = !netacad;
@@ -313,6 +318,7 @@
     });
     $('autopilotRetakes').addEventListener('change', () => Naki.saveSettings({ autopilotRetakes: Number($('autopilotRetakes').value) }));
     $('autopilotPeer').addEventListener('change', () => Naki.saveSettings({ autopilotPeer: $('autopilotPeer').checked }));
+    $('autopilotProgramming').addEventListener('change', () => Naki.saveSettings({ autopilotProgramming: $('autopilotProgramming').checked }));
     $('materialsTtlDays').addEventListener('change', () => {
         const days = Math.round(Number($('materialsTtlDays').value));
         if (days >= 1 && days <= 365) Naki.saveSettings({ materialsTtlDays: days });
@@ -369,6 +375,7 @@
         $('netacadButton').checked = settings.netacadButton;
         $('autopilotRetakes').value = String(settings.autopilotRetakes);
         $('autopilotPeer').checked = settings.autopilotPeer;
+        $('autopilotProgramming').checked = settings.autopilotProgramming;
         if (document.activeElement !== $('materialsTtlDays')) $('materialsTtlDays').value = String(settings.materialsTtlDays);
         renderModelSelect();
         renderKeyMessage();

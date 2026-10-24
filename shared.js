@@ -24,6 +24,7 @@ var Naki = (function () {
         netacadButton: true,
         autopilotRetakes: 2, // automatic retakes of a failed quiz: 0 (leave it to the user), 2 or 3
         autopilotPeer: true, // Coursera autopilot: submit graded peer-reviewed assignments and review classmates
+        autopilotProgramming: true, // Coursera autopilot: graded programming assignments (Coursera Labs notebooks)
         hotkeys: {
             solve: { code: 'KeyK', key: 'K', alt: true, ctrl: false, shift: false, meta: false },
             skip: null
@@ -165,6 +166,16 @@ var Naki = (function () {
             autopilotTitle: 'Автосолвер квизов', autopilotRun: 'Пройти весь курс', autopilotConfirm: 'Нажмите ещё раз: квизы будут отправлены',
             autopilotHint: 'Только задания, которые идут в оценку, по порядку, с отправкой. NetAcad: ещё и материалы; экзамены не трогаются',
             autopilotPeer: 'Задания с взаимной проверкой', autopilotPeerHint: 'Coursera: сдать работу (текст или файл) и проверить работы других, сколько требует курс',
+            autopilotProgramming: 'Programming assignments', autopilotProgrammingHint: 'Coursera Labs (Jupyter): написать код, прогнать ноутбук, исправить ошибки и нажать Submit Assignment',
+            labsNoNotebook: 'Ноутбук ещё не загрузился.', labsNoTasks: 'В ноутбуке не найдено ячеек с заданиями.',
+            labsWriting: 'Пишу код для {n} ячеек ({model})…', labsNoAnswer: 'модель не вернула код ячеек',
+            labsRunning: 'Запускаю ноутбук целиком (проход {round})…', labsRunFailed: 'ноутбук не запустился',
+            labsFixing: 'Ошибок: {n}, исправляю (раунд {round})…', labsStillFailing: ' Ошибки остались в ячейках: {list}.',
+            labsDone: 'Код вписан в {n} ячеек, ноутбук сохранён.', labsNoSubmit: ' Кнопки Submit Assignment нет: откройте задание через Coursera («Launch Lab»).',
+            labsSubmitting: 'Отправляю (Submit Assignment)…', labsSubmitted: 'Отправлено: {message}',
+            labsAutopilot: 'Programming assignment «{title}»: жду ноутбук…', labsGrading: '«{title}» отправлено, жду оценку…',
+            labsNoAnswerFromNotebook: 'ноутбук не ответил (лаборатория не запустилась?)', labsNotSubmitted: 'не отправлено',
+            labsNoGrade: 'отправлено, оценки пока нет.',
             autopilotRetakes: 'Если квиз не сдан', autopilotRetakes0: 'Не пересдавать', autopilotRetakes2: '2 пересдачи', autopilotRetakes3: '3 пересдачи',
             autopilotBusy: 'Автосолвер уже работает…',
             autopilotStopped: 'Автосолвер остановлен.', autopilotStopping: 'Автосолвер остановится после текущего модуля.',
@@ -274,6 +285,16 @@ var Naki = (function () {
             autopilotTitle: 'Quiz autopilot', autopilotRun: 'Go through the course', autopilotConfirm: 'Click again: quizzes will be submitted',
             autopilotHint: 'Only the work that counts toward the grade, in order, submitted. NetAcad: materials too; exams are left alone',
             autopilotPeer: 'Peer-reviewed assignments', autopilotPeerHint: 'Coursera: submit the work (text or a file) and review as many classmates as the course asks',
+            autopilotProgramming: 'Programming assignments', autopilotProgrammingHint: 'Coursera Labs (Jupyter): write the code, run the notebook, fix errors and press Submit Assignment',
+            labsNoNotebook: 'The notebook has not loaded yet.', labsNoTasks: 'No task cells found in the notebook.',
+            labsWriting: 'Writing code for {n} cells ({model})…', labsNoAnswer: 'the model returned no cell code',
+            labsRunning: 'Running the whole notebook (pass {round})…', labsRunFailed: 'the notebook did not run',
+            labsFixing: '{n} errors, fixing (round {round})…', labsStillFailing: ' Errors left in cells: {list}.',
+            labsDone: 'Code written into {n} cells, notebook saved.', labsNoSubmit: ' No Submit Assignment button: open the assignment from Coursera ("Launch Lab").',
+            labsSubmitting: 'Submitting (Submit Assignment)…', labsSubmitted: 'Submitted: {message}',
+            labsAutopilot: 'Programming assignment "{title}": waiting for the notebook…', labsGrading: '"{title}" submitted, waiting for the grade…',
+            labsNoAnswerFromNotebook: 'the notebook did not answer (lab did not start?)', labsNotSubmitted: 'not submitted',
+            labsNoGrade: 'submitted, no grade yet.',
             autopilotRetakes: 'If a quiz is failed', autopilotRetakes0: 'No retakes', autopilotRetakes2: '2 retakes', autopilotRetakes3: '3 retakes',
             autopilotBusy: 'The autopilot is already running…',
             autopilotStopped: 'The autopilot was stopped.', autopilotStopping: 'The autopilot will stop after the current module.',

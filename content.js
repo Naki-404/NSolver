@@ -824,7 +824,7 @@
     }
 
     // Graded quizzes (and, when switched on, graded peer-reviewed assignments) in course order.
-    function courseQuizzes(materials, { peer = false } = {}) {
+    function courseQuizzes(materials, { peer = false, programming = false } = {}) {
         const graded = gradedItemIds(materials);
         return orderedCourseItems(materials).map(entry => entry.item)
             .filter(item => {
@@ -833,6 +833,7 @@
                 // Without grading weights: practice quizzes ("quiz", "ungradedAssignment") are known to be ungraded.
                 if (graded ? !graded.has(item.id) : ['quiz', 'ungradedAssignment'].includes(type)) return false;
                 if (PEER_TYPES.includes(type)) return peer;
+                if (PROGRAMMING_TYPES.includes(type)) return programming;
                 // Rubric-graded items are written work reviewed by people, not quizzes.
                 return QUIZ_TYPES.includes(type) && !(item.contentSummary?.definition?.assignmentFeatures || []).includes('ASSIGNMENT_RUBRICS');
             })
@@ -914,7 +915,7 @@
         const items = !materials ? [] : only
             ? orderedCourseItems(materials).map(entry => entry.item).filter(item => item.id === only)
                 .map(item => ({ id: item.id, slug: item.slug, type: item.contentSummary?.typeName, name: item.name }))
-            : courseQuizzes(materials, { peer: state.settings.autopilotPeer });
+            : courseQuizzes(materials, { peer: state.settings.autopilotPeer, programming: state.settings.autopilotProgramming });
         if (!items.length) {
             toast(tr('autopilotNoQuizzes'), 'info', 8000);
             return;
@@ -955,12 +956,14 @@
                 }
                 return;
             }
-            if (Date.now() - run.phaseAt > (PEER_TYPES.includes(item.type) ? PEER_STUCK_MS : STUCK_MS) && run.phase !== 'submitted') {
+            const stuckMs = PEER_TYPES.includes(item.type) ? PEER_STUCK_MS : PROGRAMMING_TYPES.includes(item.type) ? PROGRAMMING_STUCK_MS : STUCK_MS;
+            if (Date.now() - run.phaseAt > stuckMs && run.phase !== 'submitted') {
                 console.warn('[Naki] Autopilot stuck on', item.name, run.phase);
                 await nextItem(run, { name: item.name, pass: false, percent: null, note: tr('autopilotStuck', { step: run.phase }) });
                 return;
             }
             if (PEER_TYPES.includes(item.type)) await peerStep(run, item);
+            else if (PROGRAMMING_TYPES.includes(item.type)) await programmingStep(run, item);
             else if (isAttemptPage()) await attemptStep(run, item);
             else await coverStep(run, item);
         } catch (error) {
@@ -1057,6 +1060,68 @@
         autopilotStep();
     }
 
+
+
+    // ------------------------------------------------------------------ programming assignments (Coursera Labs)
+    // "Launch Lab" opens a Jupyter notebook (*.labs.coursera.org) in a frame of /…/lab. The notebook is cross-origin,
+    // so the autopilot hands the work to labs.js in that frame through chrome.storage.local ("nakiLab"): pending →
+    // working (heartbeats while the notebook runs) → submitted / failed. A submitted notebook is graded within a
+    // minute or two; the item counts as passed when the course progress shows it Completed.
+
+    const PROGRAMMING_TYPES = ['gradedProgramming', 'programming'];
+    const PROGRAMMING_STUCK_MS = 30 * 60 * 1000; // programmingStep has its own, shorter waits
+    const LAB_KEY = 'nakiLab';
+
+    async function programmingStep(run, item) {
+        const { [LAB_KEY]: stored } = await chrome.storage.local.get(LAB_KEY);
+        const lab = stored && stored.runId === run.id && stored.itemId === item.id ? stored : null;
+        const finished = lab && (lab.state === 'submitted' || lab.state === 'failed');
+        if (!onLabPage() && !finished) {
+            if (run.phase !== 'lab-opening' || Date.now() - run.phaseAt > 30000) {
+                run.phase = 'lab-opening';
+                run.phaseAt = Date.now();
+                await saveRun(run);
+                location.assign(`https://www.coursera.org/learn/${run.slug}/programming/${item.id}/${item.slug}/lab`);
+            }
+            return;
+        }
+        if (!lab) {
+            await chrome.storage.local.set({ [LAB_KEY]: { runId: run.id, itemId: item.id, state: 'pending', at: Date.now() } });
+            run.phase = 'lab';
+            run.phaseAt = Date.now();
+            await saveRun(run);
+            showRun(run, tr('labsAutopilot', { title: item.name }));
+            return;
+        }
+        if (lab.state === 'pending' || lab.state === 'working') {
+            // The lab may take a few minutes to start; the notebook reports while it works.
+            const silent = Date.now() - lab.at > (lab.state === 'pending' ? 5 * 60 * 1000 : 6 * 60 * 1000);
+            if (silent) {
+                await chrome.storage.local.remove(LAB_KEY);
+                await nextItem(run, { name: item.name, pass: false, percent: null, note: tr('labsNoAnswerFromNotebook') });
+            }
+            return;
+        }
+        if (lab.state === 'failed') {
+            await chrome.storage.local.remove(LAB_KEY);
+            await nextItem(run, { name: item.name, pass: false, percent: null, note: lab.note || tr('labsNotSubmitted') });
+            return;
+        }
+        // Submitted: wait for the grade.
+        if (run.phase !== 'lab-grading') {
+            run.phase = 'lab-grading';
+            run.phaseAt = Date.now();
+            await saveRun(run);
+            showRun(run, tr('labsGrading', { title: item.name }));
+        }
+        const passed = (await fetchCompletedItems(run.userId, run.courseId)).has(item.id);
+        if (passed || Date.now() - run.phaseAt > 3 * 60 * 1000) {
+            await chrome.storage.local.remove(LAB_KEY);
+            await nextItem(run, { name: item.name, pass: passed, percent: null, note: passed ? '' : `${tr('labsNoGrade')} ${lab.note || ''}`.trim() });
+        } else {
+            await sleep(8000);
+        }
+    }
 
     // ------------------------------------------------------------------ peer-reviewed assignments
     // My submission: the model writes the work from the instructions, the parts' prompts and the course materials;
@@ -1483,7 +1548,8 @@ Answer in exactly this format, one section per rubric item, nothing else:
 
     // The solve button / hotkey on a peer-reviewed assignment: submit it and review classmates, like the autopilot.
     const peerItemHere = () => location.pathname.match(/\/learn\/[^/]+\/peer\/([^/]+)/)?.[1] || null;
-    const solveHere = () => (peerItemHere() ? startAutopilot({ only: peerItemHere() }) : solveQuiz());
+    const onLabPage = () => /\/lab\/?$/.test(location.pathname);
+    const solveHere = () => (onLabPage() ? null : peerItemHere() ? startAutopilot({ only: peerItemHere() }) : solveQuiz());
 
     // ------------------------------------------------------------------ hotkeys
 
