@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "NSolver: Coursera & NetAcad Solver / AutoPass",
   "short_name": "NSolver",
-  "version": "2.13.2",
+  "version": "2.13.3",
   "description": "NSolver — Coursera & Cisco NetAcad Solver / AutoPass by Naki: AI quiz solver (OctavAPI, Claude, ChatGPT, Gemini), hotkeys, skipping.",
   "author": "Naki",
   "homepage_url": "https://github.com/Naki-404/NSolver",

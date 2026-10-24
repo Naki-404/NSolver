@@ -771,19 +771,27 @@
 
     // Open dialogs with content. Every Coursera page keeps an empty role="dialog" (the AI assistant panel), so the first
     // [role="dialog"] of the document is usually not the confirmation.
-    const shownDialogs = () => [...document.querySelectorAll('[role="dialog"], [role="alertdialog"], [aria-modal="true"], .rc-Modal, .cds-Dialog-dialog')]
-        .filter(dialog => isShown(dialog) && (dialog.innerText || '').trim());
+    // The quiz attempt itself is a full-screen dialog (cds-FullscreenDialog) that holds the page's own Submit: it is
+    // never the confirmation, nor is a dialog that has another open dialog inside. The newest dialog comes first.
+    const DIALOGS = '[role="dialog"], [role="alertdialog"], [aria-modal="true"], .rc-Modal, .cds-Dialog-dialog';
+    const shownDialogs = () => {
+        const shown = [...document.querySelectorAll(DIALOGS)].filter(dialog => isShown(dialog) && (dialog.innerText || '').trim() &&
+            !/FullscreenDialog/.test(String(dialog.className)));
+        return shown.filter(dialog => !shown.some(other => other !== dialog && dialog.contains(other))).reverse();
+    };
 
     // Waits for a confirmation dialog and presses its button (checking "I understand…" boxes in it first).
-    async function confirmInDialog(pattern, timeoutMs) {
+    // opener: the button that opened the dialog, never pressed again here.
+    async function confirmInDialog(pattern, timeoutMs, opener = null) {
         const end = Date.now() + timeoutMs;
         do {
             for (const dialog of shownDialogs()) {
                 const button = findButton(pattern, dialog);
-                if (!button) continue;
+                if (!button || button === opener || button.contains(opener)) continue;
                 for (const box of dialog.querySelectorAll('input[type="checkbox"]')) if (!box.checked) (box.labels?.[0] || box).click();
                 await sleep(300);
-                (findButton(pattern, dialog) || button).click();
+                const again = findButton(pattern, dialog);
+                (again && again !== opener ? again : button).click();
                 return true;
             }
             await sleep(300);
@@ -1042,7 +1050,7 @@
     async function attemptStep(run, item) {
         if (run.phase === 'submitting' || run.phase === 'submitted') {
             // Waiting for the feedback page; a confirmation that showed up late is still answered.
-            if (await confirmInDialog(BUTTONS.confirm, 500)) return;
+            if (await confirmInDialog(BUTTONS.confirm, 500, document.querySelector('[data-testid="submit-button"]'))) return;
             // Still on the attempt a while later: the Submit did not go through (Honor Code, name, a dialog that
             // closed). Try again, a few times.
             if (Date.now() - run.phaseAt < 15000) return;
@@ -1058,7 +1066,7 @@
             const again = findButton(BUTTONS.submit);
             if (again) {
                 again.click();
-                await confirmInDialog(BUTTONS.confirm, 8000);
+                await confirmInDialog(BUTTONS.confirm, 8000, again);
             }
             return;
         }
@@ -1082,8 +1090,8 @@
         run.phaseAt = Date.now();
         await saveRun(run);
         submit.click();
-        // "Ready to submit?" / "You have unanswered questions": the dialog's own Submit.
-        await confirmInDialog(BUTTONS.confirm, 8000);
+        // "Ready to submit?" / "You have unanswered questions": the dialog's own Submit, not the page's again.
+        await confirmInDialog(BUTTONS.confirm, 8000, submit);
         run.phase = 'submitted';
         run.phaseAt = Date.now();
         await saveRun(run);
@@ -1466,12 +1474,12 @@ Reply with the answer itself, nothing before or after it.`).catch(error => { err
         if (!submit) return { ok: false, note: tr('peerNoteSubmitDisabled') };
         submit.click();
         // Confirmation: "I understand…" checkbox (and sometimes the legal name), then Submit.
-        const confirmation = () => shownDialogs().find(dialog => findButton(BUTTONS.confirm, dialog));
+        const confirmation = () => shownDialogs().find(dialog => { const button = findButton(BUTTONS.confirm, dialog); return button && button !== submit; });
         await waitFor(confirmation, 8000);
         const name = confirmation()?.querySelector('input[type="text"], input:not([type])');
         const fullName = readUserData()?.fullName;
         if (name && !name.value && fullName) setNativeValue(name, fullName);
-        await confirmInDialog(BUTTONS.confirm, 2000);
+        await confirmInDialog(BUTTONS.confirm, 2000, submit);
         return { ok: true };
     }
 
@@ -1548,7 +1556,7 @@ Answer in exactly this format, one section per rubric item, nothing else:
         const submit = findButton(/^(submit review|отправить отзыв|отправить рецензию)$/i);
         if (!submit) return false;
         submit.click();
-        await confirmInDialog(/^(submit|submit review|confirm|yes|отправить|отправить отзыв|подтвердить|да)$/i, 3000);
+        await confirmInDialog(/^(submit|submit review|confirm|yes|отправить|отправить отзыв|подтвердить|да)$/i, 3000, submit);
         return true;
     }
 
