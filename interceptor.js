@@ -39,6 +39,38 @@
         for (const payload of latest.values()) window.postMessage(payload, window.location.origin);
     });
 
+    // Rich text fields of Coursera (peer-reviewed assignments) are Slate editors: text typed into their DOM is not
+    // in the editor's value, so it is neither saved nor submitted. The editor object hangs on the React tree of the
+    // field; its own methods replace the content (one paragraph per line).
+    function slateEditorOf(el) {
+        const key = Object.keys(el).find(name => name.startsWith('__reactFiber$'));
+        for (let fiber = key && el[key]; fiber; fiber = fiber.return) {
+            const editor = fiber.memoizedProps && fiber.memoizedProps.editor;
+            if (editor && typeof editor.insertText === 'function' && typeof editor.select === 'function') return editor;
+        }
+        return null;
+    }
+
+    window.addEventListener('message', event => {
+        const data = event.data;
+        if (event.source !== window || data?.channel !== CHANNEL || data.kind !== 'slate-fill') return;
+        let ok = false;
+        try {
+            const el = document.querySelector(`[data-naki-target="${data.target}"]`);
+            const editor = el && slateEditorOf(el);
+            if (editor) {
+                editor.select({ anchor: editor.start([]), focus: editor.end([]) });
+                editor.delete();
+                String(data.text).split(/\n+/).map(line => line.trim()).filter(Boolean)
+                    .forEach((line, i) => { if (i) editor.insertBreak(); editor.insertText(line); });
+                ok = editor.children.some(node => (node.children || []).some(leaf => leaf.text));
+            }
+        } catch (error) {
+            console.warn('[Naki] Rich text field not filled:', error);
+        }
+        window.postMessage({ channel: CHANNEL, kind: 'slate-filled', target: data.target, ok }, window.location.origin);
+    });
+
     // XMLHttpRequest
     const originalOpen = XMLHttpRequest.prototype.open;
     const originalSend = XMLHttpRequest.prototype.send;

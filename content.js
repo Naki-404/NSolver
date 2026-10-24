@@ -1247,12 +1247,56 @@
         return true;
     }
 
-    function fillText(partId, text) {
+    // Rich text (Slate) fields are filled through their editor in the page (interceptor.js): text put into their DOM
+    // is not in the editor's value and would be submitted empty.
+    function fillSlate(field, text) {
+        const target = String(Date.now() + Math.random());
+        field.dataset.nakiTarget = target;
+        return new Promise(resolve => {
+            const timer = setTimeout(() => done(false), 3000);
+            function done(ok) {
+                clearTimeout(timer);
+                window.removeEventListener('message', onMessage);
+                delete field.dataset.nakiTarget;
+                resolve(ok);
+            }
+            function onMessage(event) {
+                if (event.source === window && event.data?.channel === CHANNEL && event.data.kind === 'slate-filled' && event.data.target === target) done(!!event.data.ok);
+            }
+            window.addEventListener('message', onMessage);
+            window.postMessage({ channel: CHANNEL, kind: 'slate-fill', target, text }, window.location.origin);
+        });
+    }
+
+    async function fillText(partId, text) {
         const field = partControls(partId, 'textarea, [contenteditable="true"], input[type="text"], input:not([type])')[0];
         if (!field) return false;
+        if (field.matches('[data-slate-editor="true"]')) return fillSlate(field, text.replace(/^#{1,4}\s+/gm, '').replace(/\*\*(.+?)\*\*/g, '$1'));
         if (field.isContentEditable) setEditableText(field, text);
         else setNativeValue(field, text);
         return true;
+    }
+
+    // Coursera turns the rich text into the draft a few seconds after typing: wait, leave the field, Save draft,
+    // then read the draft back. Returns the part ids that are still empty in the saved draft.
+    async function saveDraftAndCheck(run, item, textParts) {
+        await sleep(5000);
+        document.activeElement?.blur?.();
+        await sleep(1000);
+        const save = findButton(/^save draft$/i);
+        if (save) {
+            save.click();
+            await sleep(3000);
+        }
+        const data = await getJson(`${API}/onDemandPeerSubmissionDrafts.v1/${run.userId}~${run.courseId}~${item.id}/?fields=submission`).catch(() => null);
+        const parts = data?.elements?.[0]?.submission?.parts;
+        if (!parts) return []; // no draft API answer: do not block the submission on it
+        const filled = definition => {
+            if (typeof definition?.plainText === 'string') return definition.plainText.trim().length > 0;
+            const value = definition?.richText?.definition?.value;
+            return typeof value === 'string' ? htmlToText(value).trim().length > 0 : true;
+        };
+        return textParts.filter(id => !filled(parts[id]?.definition));
     }
 
     // Free text from the model (written work has formulas, quotes and backslashes that break JSON answers).
@@ -1402,11 +1446,17 @@ Reply with the answer itself, nothing before or after it.`).catch(error => { err
             } else if ((kind === 'options' || kind === 'yesNo') && value !== undefined) {
                 ok = chooseOption(part.id, optionsOf(part), optionNumber(value));
             } else if (kind === 'text' && value) {
-                ok = fillText(part.id, String(value));
+                ok = await fillText(part.id, String(value));
             }
             // Optional parts may stay empty, but a part with an answer that did not go in means the work is incomplete.
             if (!ok && (value || part.details?.definition?.required !== false)) manual.push(cmlText(part.prompt).slice(0, 60) || kind);
             await sleep(300);
+        }
+        if (!manual.length) {
+            // Nothing is submitted with a text part that did not reach the saved draft (Coursera would get it empty).
+            const textParts = assignment.submissionParts.filter(part => partKind(part) === 'text' && answer.parts[part.id]).map(part => part.id);
+            const empty = await saveDraftAndCheck(run, item, textParts);
+            for (const id of empty) manual.push(cmlText(assignment.submissionParts.find(part => part.id === id)?.prompt).slice(0, 60) || 'text');
         }
         if (manual.length) return { ok: false, note: tr('peerNoteManual', { parts: manual.join('; ') }) };
         // Honor Code on the page ("I, <name>, understand and agree."): Submit stays disabled until it is checked.
@@ -1489,7 +1539,7 @@ Answer in exactly this format, one section per rubric item, nothing else:
             if (!value) continue;
             const ok = part.kind === 'options'
                 ? chooseOption(part.id, part.options, optionNumber(value))
-                : fillText(part.id, value);
+                : await fillText(part.id, value);
             if (ok) filled++;
             await sleep(200);
         }
