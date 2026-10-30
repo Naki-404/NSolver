@@ -242,3 +242,10 @@ select { text-overflow: ellipsis; }
     border-radius: 10px; border: 1px solid var(--border); background: var(--surface-2); color: var(--text); outline: none;
 }
 .compact-number:focus { border-color: rgba(139, 92, 246, .7); }
+
+/* course queue card */
+.queue-links {
+    width: 100%; resize: vertical; min-height: 72px; padding: 8px 10px; border-radius: 10px; border: 1px solid var(--border);
+    background: var(--surface-2); color: var(--text); font: 11.5px/1.45 ui-monospace, Consolas, monospace; outline: none;
+}
+.queue-links:focus { border-color: rgba(139, 92, 246, .7); }

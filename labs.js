@@ -221,6 +221,8 @@ Answer with one section per TODO cell you change (likely ${owners.join(', ')}), 
             }
             const message = sent?.message || '';
             toast(tr('labsSubmitted', { message }) + errors, sent?.submitted ? 'success' : 'error', 20000);
+            // Solved by hand (not handed over by the autopilot): the Coursera page goes back to the assignment.
+            if (sent?.submitted && !labRun && window !== window.top) chrome.runtime.sendMessage({ type: Naki.MSG.RELAY, action: Naki.MSG.LAB_DONE }).catch(() => { });
             return { ok: !!sent?.submitted, submitted: !!sent?.submitted, note: [message, errors].filter(Boolean).join(' ') };
         } catch (error) {
             console.error('[Naki] Notebook solver error:', error);

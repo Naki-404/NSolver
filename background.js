@@ -77,7 +77,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return true;
     }
     // A hotkey pressed inside a NetAcad course frame: the top frame owns the UI and does the work.
-    const relayed = [Naki.MSG.SOLVE, Naki.MSG.SKIP];
+    // A notebook frame (Coursera Labs) that submitted: the Coursera page around it leaves the lab.
+    const relayed = [Naki.MSG.SOLVE, Naki.MSG.SKIP, Naki.MSG.LAB_DONE];
     if (message?.type === Naki.MSG.RELAY && sender.tab && relayed.includes(message.action)) {
         chrome.tabs.sendMessage(sender.tab.id, { type: message.action }, { frameId: 0 }).catch(() => { });
     }

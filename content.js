@@ -899,10 +899,11 @@
         const message = tr('autopilotCourseraDone', { passed, failed: failed.length }) + (details ? ` ${details}` : '');
         console.log('[Naki] Coursera autopilot finished:', run.results);
         markAutopilot(false);
+        if (await queueCourseDone(run.slug, { passed, failed: failed.length, note: details })) return;
         if (onLabPage()) {
             // Back from the notebook to the course page; the summary is shown there.
             await chrome.storage.local.set({ [SUMMARY_KEY]: { message, type: failed.length ? 'info' : 'success', at: Date.now() } });
-            location.assign(`https://www.coursera.org/learn/${run.slug}/home/welcome`);
+            leaveLab(`https://www.coursera.org/learn/${run.slug}/home/welcome`);
             return;
         }
         showRun(null, message, failed.length ? 'info' : 'success', 20000);
@@ -925,14 +926,16 @@
     };
 
     // only: the id of one item to do (the peer-reviewed assignment open now) instead of the whole course.
+    // Returns true when a run started.
     async function startAutopilot({ only = null } = {}) {
         const running = await loadRun();
         if (running) {
-            // A second press stops the run.
+            // A second press stops the run (and the course queue around it).
             await stopRun(running);
+            await stopQueue();
             showRun(null, tr('autopilotStopped'), 'info', 6000);
             runToast = null;
-            return;
+            return false;
         }
         if (!Naki.activeKey(state.settings)) {
             toast(tr('toastNoKey'), 'error');
@@ -951,7 +954,7 @@
             : courseQuizzes(materials, { peer: state.settings.autopilotPeer, programming: state.settings.autopilotProgramming });
         if (!items.length) {
             toast(tr('autopilotNoQuizzes'), 'info', 8000);
-            return;
+            return false;
         }
         const userId = state.userId || readUserId() || await fetchUserId().catch(() => null);
         const courseId = materials.linked?.['onDemandGradingParameters.v1']?.[0]?.id || await fetchCourseId(slug).catch(() => null);
@@ -964,6 +967,7 @@
         await saveRun(run);
         console.log('[Naki] Coursera autopilot:', items);
         runLoop();
+        return true;
     }
 
     let stepping = false;
@@ -1114,6 +1118,153 @@
 
 
 
+
+    // ------------------------------------------------------------------ course queue
+    // "Go through courses" in the settings: Coursera links (courses, specializations, professional certificates,
+    // expanded to their courses by the panel) are done one after another. Each course: enroll (free options only:
+    // "Enroll for free", "Audit"; never a trial, subscription or payment), mark the materials complete (as "Skip
+    // materials"), then the autopilot over its graded work. The queue lives in chrome.storage.local and goes on after
+    // every page load.
+
+    const QUEUE_KEY = 'nakiCourseQueue'; // { id, courses: [{ slug, name }], index, phase, phaseAt, tries, results: [] }
+    const FREE_CHOICE = /^(enroll for free|enroll|join for free|join course|audit|audit (the|this) course|audit only|full course, no certificate|go to course|start learning|continue|записаться бесплатно|записаться|прослушать|перейти к курсу)\b/i;
+    const PAID_CHOICE = /trial|subscri|purchase|buy|pay|upgrade|checkout|plus|per month|\/month|[$€£₸₽]|пробн|подписк|оплат|купить/i;
+
+    async function loadQueue() {
+        const { [QUEUE_KEY]: queue } = await chrome.storage.local.get(QUEUE_KEY);
+        return queue && !queue.stopped ? queue : null;
+    }
+    const saveQueue = queue => chrome.storage.local.set({ [QUEUE_KEY]: queue });
+    async function stopQueue() {
+        const queue = await loadQueue();
+        if (queue) await saveQueue({ ...queue, stopped: true });
+    }
+    const courseUrl = (slug, tail = '') => `https://www.coursera.org/learn/${slug}${tail}`;
+
+    // Enrolled (or pre-enrolled) in the course of this slug: the learner's memberships.
+    async function isEnrolled(slug) {
+        const data = await getJson(`${API}/memberships.v1?q=me&includes=courseId&fields=courseId,role,courses.v1(slug)`).catch(() => null);
+        const course = (data?.linked?.['courses.v1'] || []).find(entry => entry.slug === slug);
+        if (!course) return false;
+        const membership = (data.elements || []).find(entry => entry.courseId === course.id);
+        return !!membership && !/NOT_ENROLLED|BROWSER/i.test(membership.role || '');
+    }
+
+    const clickableText = el => (el.innerText || el.textContent || el.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
+
+    // The free way into the course on its page: the Enroll button, then (for courses of a paid program) the free
+    // choice in the dialog. Anything that looks like a trial, a subscription or a payment is never clicked.
+    async function enrollHere() {
+        const button = document.querySelector('[data-testid="enroll-button"], [data-e2e="enroll-button"]') ||
+            [...document.querySelectorAll('button, a[role="button"]')].find(el => isShown(el) && /^(enroll for free|enroll|join for free)\b/i.test(clickableText(el)));
+        if (!button || !isShown(button) || PAID_CHOICE.test(clickableText(button))) return false;
+        button.click();
+        for (let i = 0; i < 20; i++) {
+            await sleep(1000);
+            if (/\/(payments|checkout|purchase)/.test(location.pathname)) return false;
+            if (/\/learn\/[^/]+\/home/.test(location.pathname)) return true;
+            for (const dialog of shownDialogs()) {
+                const choice = [...dialog.querySelectorAll('button, a')].find(el => isShown(el) && FREE_CHOICE.test(clickableText(el)) && !PAID_CHOICE.test(clickableText(el)));
+                if (choice) {
+                    choice.click();
+                    await sleep(2500);
+                    break;
+                }
+            }
+            if (await isEnrolled(courseSlug())) return true;
+        }
+        return isEnrolled(courseSlug());
+    }
+
+    async function setQueuePhase(queue, phase) {
+        queue.phase = phase;
+        queue.phaseAt = Date.now();
+        await saveQueue(queue);
+    }
+
+    // The autopilot of a queued course ended (or found nothing to do): record it and open the next course.
+    async function queueCourseDone(slug, result) {
+        const queue = await loadQueue();
+        const course = queue?.courses[queue.index];
+        if (!course || course.slug !== slug) return false;
+        queue.results.push({ slug, name: course.name || slug, ...result });
+        queue.index++;
+        queue.tries = 0;
+        await setQueuePhase(queue, 'open');
+        setTimeout(queueStep, 100); // after the current step (if any) has let go
+        return true;
+    }
+
+    async function finishQueue(queue) {
+        await chrome.storage.local.remove(QUEUE_KEY);
+        const lines = queue.results.map(result => `${result.name}: ${result.note && !result.passed && !result.failed ? result.note : tr('queueCourseResult', { passed: result.passed || 0, failed: result.failed || 0 })}`);
+        const message = tr('queueDone', { n: queue.results.length }) + (lines.length ? ` ${lines.join('; ')}` : '');
+        console.log('[Naki] Course queue finished:', queue.results);
+        await chrome.storage.local.set({ [SUMMARY_KEY]: { message, type: 'success', at: Date.now() } });
+        toast(message, 'success', 30000);
+    }
+
+    let queueBusy = false;
+    async function queueStep() {
+        if (queueBusy || !alive()) return;
+        queueBusy = true;
+        try {
+            const queue = await loadQueue();
+            if (!queue) return;
+            const course = queue.courses[queue.index];
+            if (!course) {
+                await finishQueue(queue);
+                return;
+            }
+            const skipCourse = async note => queueCourseDone(course.slug, { passed: 0, failed: 0, note });
+            if (courseSlug() !== course.slug) {
+                if (queue.phase !== 'navigating' || Date.now() - queue.phaseAt > 20000) {
+                    await setQueuePhase(queue, 'navigating');
+                    if (onLabPage()) leaveLab(courseUrl(course.slug));
+                    else location.assign(courseUrl(course.slug));
+                }
+                return;
+            }
+            if (await loadRun()) return; // the autopilot is on this course; its end moves the queue on
+            toast(tr('queueCourse', { n: queue.index + 1, total: queue.courses.length, title: course.name || course.slug }), 'info', 6000);
+            if (queue.phase === 'navigating' || queue.phase === 'open') await setQueuePhase(queue, 'enroll');
+            if (queue.phase === 'enroll') {
+                if (!(await isEnrolled(course.slug))) {
+                    queue.tries = (queue.tries || 0) + 1;
+                    await saveQueue(queue);
+                    const enrolled = queue.tries <= 2 && await enrollHere();
+                    if (!enrolled) {
+                        if (queue.tries >= 2) await skipCourse(tr('queueNotEnrolled'));
+                        else location.reload(); // the page may not have been ready: one more try
+                        return;
+                    }
+                }
+                await setQueuePhase(queue, 'skip');
+                // The course pages (materials API) answer once the enrollment has gone through.
+                location.assign(courseUrl(course.slug, '/home/welcome'));
+                return;
+            }
+            if (queue.phase === 'skip') {
+                await setQueuePhase(queue, 'autopilot');
+                await skipContent();
+                await sleep(2000);
+            }
+            if (queue.phase === 'autopilot') {
+                await setQueuePhase(queue, 'running');
+                if (!(await startAutopilot())) await skipCourse(tr('queueNothingGraded'));
+                return;
+            }
+            if (queue.phase === 'running') {
+                // A run that ended without reaching finishRun on this page (stopped, page closed): next course.
+                await queueCourseDone(course.slug, { passed: 0, failed: 0, note: tr('queueRunEnded') });
+            }
+        } catch (error) {
+            console.error('[Naki] Course queue step failed:', error);
+        } finally {
+            queueBusy = false;
+        }
+    }
+
     // ------------------------------------------------------------------ programming assignments (Coursera Labs)
     // "Launch Lab" opens a Jupyter notebook (*.labs.coursera.org) in a frame of /…/lab. The notebook is cross-origin,
     // so the autopilot hands the work to labs.js in that frame through chrome.storage.local ("nakiLab"): pending →
@@ -1121,6 +1272,13 @@
     // minute or two; the item counts as passed when the course progress shows it Completed.
 
     const PROGRAMMING_TYPES = ['gradedProgramming', 'programming'];
+
+    // Leaving a lab page: the notebook frame goes first (Jupyter may ask "Leave site?" while it is open).
+    function leaveLab(url) {
+        markAutopilot(true);
+        for (const frame of document.querySelectorAll('iframe')) if (/labs\.coursera\.org/.test(frame.src)) frame.remove();
+        location.assign(url);
+    }
     const PROGRAMMING_STUCK_MS = 30 * 60 * 1000; // programmingStep has its own, shorter waits
     const LAB_KEY = 'nakiLab';
 
@@ -1159,7 +1317,11 @@
             await nextItem(run, { name: item.name, pass: false, percent: null, note: lab.note || tr('labsNotSubmitted') });
             return;
         }
-        // Submitted: wait for the grade.
+        // Submitted: leave the notebook for the assignment page and wait for the grade there.
+        if (onLabPage()) {
+            leaveLab(`https://www.coursera.org/learn/${run.slug}/programming/${item.id}/${item.slug}`);
+            return;
+        }
         if (run.phase !== 'lab-grading') {
             run.phase = 'lab-grading';
             run.phaseAt = Date.now();
@@ -1687,6 +1849,11 @@ Answer in exactly this format, one section per rubric item, nothing else:
                 skipContent();
                 sendResponse({ ok: true });
                 break;
+            case Naki.MSG.LAB_DONE:
+                // A lab solved by hand was submitted: back to the assignment page (grade, My submissions).
+                if (onLabPage()) loadRun().then(run => { if (!run) setTimeout(() => leaveLab(location.pathname.replace(/\/lab\/?$/, '')), 4000); });
+                sendResponse({ ok: true });
+                break;
             case Naki.MSG.MATERIALS_LOAD:
                 loadMaterialsNow();
                 sendResponse({ ok: true });
@@ -1722,6 +1889,7 @@ Answer in exactly this format, one section per rubric item, nothing else:
         state.settings = settings;
         requestReplay();
         loadRun().then(run => { if (run) runLoop(); else showStoredSummary(); }); // resume a quiz autopilot run after a page load
+        setTimeout(queueStep, 2500); // the course queue goes on after every page load
     });
     console.log('[Naki] NSolver loaded — made by Naki: https://github.com/Naki-404/NSolver');
 })();

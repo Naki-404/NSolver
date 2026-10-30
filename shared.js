@@ -7,7 +7,8 @@ var Naki = (function () {
         API_REQUEST: 'naki:api-request',
         RELAY: 'naki:relay',
         AUTOPILOT: 'naki:autopilot',
-        MATERIALS_LOAD: 'naki:materials-load'
+        MATERIALS_LOAD: 'naki:materials-load',
+        LAB_DONE: 'naki:lab-done'
     };
 
     const PROVIDER_IDS = ['octava', 'anthropic', 'openai', 'gemini'];
@@ -20,6 +21,7 @@ var Naki = (function () {
         autoSolve: false,
         courseContext: true, // course texts from the materials base go into the prompt (Coursera and NetAcad)
         materialsTtlDays: 14, // a downloaded Coursera course is downloaded again after this many days
+        courseQueueLinks: '', // Coursera course / specialization links for "Go through courses", one per line
         skipDiscussions: false,
         netacadButton: true,
         autopilotRetakes: 2, // automatic retakes of a failed quiz: 0 (leave it to the user), 2 or 3
@@ -120,6 +122,13 @@ var Naki = (function () {
             // materials base
             materialsTitle: 'База материалов', materialsSummary: 'Курсов: {courses} · {size}',
             materialsEmpty: 'Пока пусто: материалы собираются при первом тесте курса Coursera или NetAcad.',
+            queueTitle: 'Автопроход курсов', queueHint: 'Ссылки на курсы Coursera, специализации или профессиональные сертификаты, по одной в строке. Для каждого курса по очереди NSolver записывается (только бесплатно: Enroll for free или Audit, без пробных периодов и оплаты), засчитывает материалы и проходит автосолвером всё, что идёт в оценку.',
+            queuePlaceholder: 'https://www.coursera.org/learn/…\nhttps://www.coursera.org/specializations/…', queueStart: 'Пройти все курсы', queueStop: 'Остановить',
+            queueIdle: 'Не запущен.', queueRunning: 'Курс {n} из {total}: {title}', queueNoLinks: 'Нет ссылок на Coursera.', queueExpanding: 'Собираю список курсов…',
+            queueStarted: 'Курсов в очереди: {n}. Открываю первый…', queueStopped: 'Автопроход остановлен.',
+            queueCourse: 'Автопроход — курс {n} из {total}: {title}', queueNotEnrolled: 'не удалось записаться бесплатно (платный курс?)',
+            queueNothingGraded: 'материалы засчитаны, оцениваемых заданий нет', queueRunEnded: 'автосолвер остановлен',
+            queueDone: 'Автопроход закончен, курсов: {n}.', queueCourseResult: 'сдано {passed}, не сдано {failed}',
             materialsTtl: 'Обновлять через, дней', materialsTtlHint: 'Coursera: курс скачивается заново, когда база старше. Курсы с ручными правками не обновляются',
             materialsOpen: 'Открыть базу', materialsLoad: 'Загрузить этот курс',
             mbHint: 'Это то, что NSolver передаёт модели вместе с вопросами Coursera и NetAcad. Выключенные материалы не используются. Ручные правки и заметки сохраняются, когда курс скачивается заново.',
@@ -241,6 +250,13 @@ var Naki = (function () {
             toastMaterialsLoaded: 'Course materials in the base: {n}.',
             materialsTitle: 'Materials base', materialsSummary: 'Courses: {courses} · {size}',
             materialsEmpty: 'Empty so far: materials are collected with the first quiz of a Coursera or NetAcad course.',
+            queueTitle: 'Go through courses', queueHint: 'Links to Coursera courses, specializations or professional certificates, one per line. Course after course NSolver enrolls (free only: Enroll for free or Audit, never a trial or a payment), marks the materials complete and runs the autopilot over everything graded.',
+            queuePlaceholder: 'https://www.coursera.org/learn/…\nhttps://www.coursera.org/specializations/…', queueStart: 'Go through all courses', queueStop: 'Stop',
+            queueIdle: 'Not running.', queueRunning: 'Course {n} of {total}: {title}', queueNoLinks: 'No Coursera links.', queueExpanding: 'Collecting the course list…',
+            queueStarted: '{n} courses queued. Opening the first…', queueStopped: 'Stopped.',
+            queueCourse: 'Courses — {n} of {total}: {title}', queueNotEnrolled: 'could not enroll for free (paid course?)',
+            queueNothingGraded: 'materials completed, nothing graded', queueRunEnded: 'the autopilot was stopped',
+            queueDone: 'All courses done: {n}.', queueCourseResult: '{passed} passed, {failed} failed',
             materialsTtl: 'Refresh after, days', materialsTtlHint: 'Coursera: the course is downloaded again once the base is older. Courses edited by hand are not refreshed',
             materialsOpen: 'Open the base', materialsLoad: 'Load this course',
             mbHint: 'This is what NSolver gives the model along with Coursera and NetAcad questions. Switched-off materials are not used. Manual edits and notes are kept when a course is downloaded again.',

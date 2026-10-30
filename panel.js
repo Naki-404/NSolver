@@ -118,6 +118,17 @@
             </section>
 
             <section class="card">
+                <div class="card-title"><h2 data-i18n="queueTitle"></h2></div>
+                <p class="hint" data-i18n="queueHint"></p>
+                <textarea id="queueLinks" class="queue-links" rows="4" spellcheck="false" data-i18n-placeholder="queuePlaceholder"></textarea>
+                <div class="materials-actions">
+                    <button class="btn small" id="queueStart" type="button"><span data-i18n="queueStart"></span></button>
+                    <button class="btn secondary small" id="queueStop" type="button" hidden><span data-i18n="queueStop"></span></button>
+                </div>
+                <p class="message" id="queueStatus"></p>
+            </section>
+
+            <section class="card">
                 <div class="card-title"><h2 data-i18n="materialsTitle"></h2><span id="materialsSummary"></span></div>
                 <div class="materials-actions">
                     <button class="btn secondary small" id="materialsOpen" type="button"><span data-i18n="materialsOpen"></span></button>
@@ -374,6 +385,7 @@
         $('skipDiscussions').checked = settings.skipDiscussions;
         $('netacadButton').checked = settings.netacadButton;
         $('autopilotRetakes').value = String(settings.autopilotRetakes);
+        if (document.activeElement !== $('queueLinks')) $('queueLinks').value = settings.courseQueueLinks;
         $('autopilotPeer').checked = settings.autopilotPeer;
         $('autopilotProgramming').checked = settings.autopilotProgramming;
         if (document.activeElement !== $('materialsTtlDays')) $('materialsTtlDays').value = String(settings.materialsTtlDays);
@@ -448,6 +460,75 @@
     }
 
     $('materialsOpen').addEventListener('click', () => chrome.tabs.create({ url: chrome.runtime.getURL('materials.html') }));
+
+    // ------------------------------------------------------------------ course queue (content.js does the work)
+
+    const QUEUE_KEY = 'nakiCourseQueue';
+    let queueMessage = null; // { key, kind, vars } shown instead of the queue state
+
+    // Courses (/learn/<slug>) and programs (/specializations/<slug>, /professional-certificates/<slug>) in the links.
+    function parseCourseLinks(text) {
+        const entries = [];
+        for (const line of String(text).split(/\s+/)) {
+            const match = line.match(/coursera\.org\/(learn|specializations|professional-certificates)\/([\w-]+)/i);
+            if (match) entries.push({ kind: match[1].toLowerCase() === 'learn' ? 'course' : 'program', slug: match[2] });
+        }
+        return entries;
+    }
+
+    async function programCourses(slug) {
+        const api = 'https://www.coursera.org/api';
+        const program = await (await fetch(`${api}/onDemandSpecializations.v1?q=slug&slug=${encodeURIComponent(slug)}&fields=courseIds,name`)).json();
+        const ids = program?.elements?.[0]?.courseIds || [];
+        if (!ids.length) return [];
+        const courses = await (await fetch(`${api}/courses.v1?ids=${ids.join(',')}&fields=slug,name`)).json();
+        const byId = new Map((courses?.elements || []).map(course => [course.id, course]));
+        return ids.map(id => byId.get(id)).filter(Boolean).map(course => ({ slug: course.slug, name: course.name }));
+    }
+
+    async function renderQueue() {
+        const { [QUEUE_KEY]: queue } = await chrome.storage.local.get(QUEUE_KEY);
+        const running = !!queue && !queue.stopped && queue.index < queue.courses.length;
+        $('queueStop').hidden = !running;
+        $('queueStart').disabled = running;
+        const course = running ? queue.courses[queue.index] : null;
+        const msg = queueMessage || (running ? { key: 'queueRunning', kind: 'success', vars: { n: queue.index + 1, total: queue.courses.length, title: course.name || course.slug } } : { key: 'queueIdle', kind: '' });
+        $('queueStatus').textContent = tr(msg.key, msg.vars);
+        $('queueStatus').className = `message ${msg.kind}`;
+    }
+
+    $('queueLinks').addEventListener('change', () => Naki.saveSettings({ courseQueueLinks: $('queueLinks').value }));
+    $('queueStart').addEventListener('click', async () => {
+        await Naki.saveSettings({ courseQueueLinks: $('queueLinks').value });
+        const entries = parseCourseLinks($('queueLinks').value);
+        queueMessage = null;
+        if (!entries.length) { queueMessage = { key: 'queueNoLinks', kind: 'error' }; renderQueue(); return; }
+        if (!Naki.activeKey(settings)) { showTab('settings'); setKeyMessage('keyFirst', 'error'); return; }
+        queueMessage = { key: 'queueExpanding', kind: '' };
+        renderQueue();
+        const courses = [];
+        for (const entry of entries) {
+            const list = entry.kind === 'course' ? [{ slug: entry.slug }] : await programCourses(entry.slug).catch(() => []);
+            for (const course of list) if (!courses.some(other => other.slug === course.slug)) courses.push(course);
+        }
+        if (!courses.length) { queueMessage = { key: 'queueNoLinks', kind: 'error' }; renderQueue(); return; }
+        await chrome.storage.local.set({ [QUEUE_KEY]: { id: String(Date.now()), courses, index: 0, phase: 'open', phaseAt: 0, tries: 0, results: [] } });
+        queueMessage = { key: 'queueStarted', kind: 'success', vars: { n: courses.length } };
+        renderQueue();
+        const url = `https://www.coursera.org/learn/${courses[0].slug}`;
+        const tab = await targetTab().catch(() => null);
+        if (tab?.id && /^https:\/\/www\.coursera\.org\//.test(tab.url || '')) await chrome.tabs.update(tab.id, { url });
+        else await chrome.tabs.create({ url });
+    });
+    $('queueStop').addEventListener('click', async () => {
+        const stored = await chrome.storage.local.get([QUEUE_KEY, 'nakiAutopilot']);
+        if (stored[QUEUE_KEY]) await chrome.storage.local.set({ [QUEUE_KEY]: { ...stored[QUEUE_KEY], stopped: true } });
+        // The autopilot of the current course stops too (content.js treats a stopped run id as gone).
+        if (stored.nakiAutopilot) await chrome.storage.local.set({ nakiAutopilotStop: stored.nakiAutopilot.id });
+        await chrome.storage.local.remove('nakiAutopilot');
+        queueMessage = { key: 'queueStopped', kind: '' };
+        renderQueue();
+    });
     $('materialsLoad').addEventListener('click', async () => {
         try {
             await sendToTab({ type: Naki.MSG.MATERIALS_LOAD });
@@ -613,6 +694,7 @@
         if (area !== 'local') return;
         const keys = Object.keys(changes);
         if (keys.some(key => SETTINGS_KEYS.has(key))) reload();
+        if (keys.includes(QUEUE_KEY)) { queueMessage = null; renderQueue(); }
         if (keys.some(key => key.startsWith(MATERIALS_PREFIX) || key === 'nakiMaterialsIndex')) {
             clearTimeout(summaryTimer);
             summaryTimer = setTimeout(() => renderMaterialsSummary().catch(() => { }), 500);
@@ -625,6 +707,7 @@
     renderHotkeys();
     reload().then(() => {
         refreshStatus();
+        renderQueue().catch(() => { });
         renderMaterialsSummary().catch(() => { });
         setTimeout(refreshModelsIfStale, 300);
     });
