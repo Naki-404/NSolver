@@ -247,15 +247,59 @@
         });
     }
 
+    // Matching questions (objectMatching: a dropdown of options per category). Secure exams shuffle the pairs in the
+    // data, so each category goes to the model as a single-choice question: "<stem> — <category>" with every option.
+    const isMatching = model => get(model, '_component') === 'objectMatching' && (get(model, 'categoryItems') || []).length > 0;
+    function matchingParts(model) {
+        const stem = plain(get(model, 'body')) || 'Match the items';
+        const options = (get(model, 'optionItems') || []).map(item => plain(item.option));
+        return (get(model, 'categoryItems') || []).map((item, k) => ({
+            id: `${get(model, '_id')}::${k}`, category: plain(item.category), question: `${stem} — Which option matches "${plain(item.category)}"?`, options, multiple: false
+        }));
+    }
+
     async function prefetchAnswers(articleId) {
         const current = currentArticle(articleId);
         if (!current) return;
-        const questions = current.article.getAllDescendantModels(true).filter(m => get(m, '_isQuestionType')).map(questionEntry)
+        const models = current.article.getAllDescendantModels(true).filter(m => get(m, '_isQuestionType'));
+        const questions = models.map(questionEntry)
             .filter(entry => !entry.correct && isChoice(entry) && !batchAnswers.has(entry.id))
             .map(({ id, question, options, multiple }) => ({ id, question, options, multiple }));
+        for (const model of models.filter(isMatching)) {
+            for (const part of matchingParts(model)) if (!batchAnswers.has(part.id) && part.options.length) questions.push({ id: part.id, question: part.question, options: part.options, multiple: false });
+        }
         if (!questions.length) return;
         const answers = await askAiBatch(questions);
         for (const [id, indices] of Object.entries(answers || {})) if (Array.isArray(indices) && indices.length) batchAnswers.set(id, indices);
+    }
+
+    // A matching question on the screen: in each category's dropdown, the option the answers say.
+    async function answerMatching(view) {
+        const model = view.model;
+        const parts = matchingParts(model);
+        const dropdowns = allElements(view.shadowRoot || view).filter(el => el.tagName === 'OBJECT-MATCHING-DROPDOWN-VIEW');
+        let done = 0;
+        for (const dropdown of dropdowns) {
+            const root = dropdown.shadowRoot || dropdown;
+            const title = plain(root.querySelector('.matching__item-title_inner')?.textContent || '');
+            const part = parts.find(entry => entry.category === title) || parts[dropdowns.indexOf(dropdown)];
+            const indices = part && batchAnswers.get(part.id);
+            if (!indices?.length) continue;
+            const wanted = plain(part.options[indices[0]]).toLowerCase();
+            const button = root.querySelector('button.dropdown__btn');
+            if (!button) continue;
+            button.click();
+            await sleep(300);
+            const option = [...root.querySelectorAll('[role="option"]')].find(li => plain(li.textContent).toLowerCase() === wanted);
+            if (option) {
+                (option.querySelector('.dropdown__item-inner') || option).click();
+                done++;
+            } else if (button.getAttribute('aria-expanded') === 'true') {
+                button.click();
+            }
+            await sleep(300);
+        }
+        return done > 0;
     }
 
     // Options are labelled "<question id>-<index>-label" (inputs "-input").
@@ -311,8 +355,11 @@
             const question = view.model;
             const id = get(question, '_id');
             answered.add(id);
-            let fromData = await answerFromData(doc, question);
-            if (!fromData && isChoice(questionEntry(question))) {
+            let fromData = isMatching(question) ? false : await answerFromData(doc, question);
+            if (isMatching(question)) {
+                await prefetchAnswers(articleId);
+                fromData = await answerMatching(view);
+            } else if (!fromData && isChoice(questionEntry(question))) {
                 // "1 question at a time" exams load each question when it comes: the bank (or the model) for it now.
                 await prefetchAnswers(articleId);
                 fromData = await answerFromData(doc, question);
@@ -435,7 +482,8 @@
                 count = now;
             }
         }
-        // All answers first.
+        // All answers first (a second request for any the model left out).
+        await prefetchAnswers(articleId);
         await prefetchAnswers(articleId);
         const wantedFor = model => {
             const items = get(model, '_items') || [];
@@ -459,15 +507,16 @@
             }, 6000);
             if (!view) continue;
             const doc = currentArticle(articleId).doc;
-            const wanted = wantedFor(view.model);
-            if (wanted) {
+            const wanted = isMatching(view.model) ? null : wantedFor(view.model);
+            if (isMatching(view.model)) {
+                if (await answerMatching(view)) { log.ai = (log.ai || 0) + 1; log.answered = (log.answered || 0) + 1; }
+            } else if (wanted) {
                 await selectOptions(doc, get(view.model, '_id'), wanted);
                 log.answered = (log.answered || 0) + 1;
             } else {
-                // Not a choice question or no answer: the solver of netacad.js looks at the screen.
-                log.ai = (log.ai || 0) + 1;
-                await askAi(get(view.model, '_id'));
-                log.answered = (log.answered || 0) + 1;
+                // No answer for it (an unknown question type): left for the learner. The on-screen solver is not
+                // used here, every question of the row is rendered at once.
+                log.missed = (log.missed || 0) + 1;
             }
             await sleep(250);
             // Some exams still want the per-question Submit after the answer.
