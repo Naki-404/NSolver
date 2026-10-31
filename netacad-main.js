@@ -311,11 +311,17 @@
             const question = view.model;
             const id = get(question, '_id');
             answered.add(id);
-            const fromData = await answerFromData(doc, question);
+            let fromData = await answerFromData(doc, question);
+            if (!fromData && isChoice(questionEntry(question))) {
+                // "1 question at a time" exams load each question when it comes: the bank (or the model) for it now.
+                await prefetchAnswers(articleId);
+                fromData = await answerFromData(doc, question);
+            }
             if (!fromData) {
                 log.ai = (log.ai || 0) + 1;
                 await askAi(id);
             }
+            log.fromData = (log.fromData || 0) + (fromData ? 1 : 0);
             await sleep(150);
             if (!await submitQuestion(doc, view)) return;
             log.answered = (log.answered || 0) + 1;
@@ -379,6 +385,51 @@
         }
     }
 
+    // ---------------------------------------------------------------- "Solve" on an open quiz or exam
+    // The assessment on the screen (started or at its start screen) is answered question by question; it stops at
+    // the "Submit My Assessment" screen, which is left to the learner.
+
+    function activeAssessment() {
+        const found = findCourse();
+        if (!found) return null;
+        const doc = found.win.document;
+        for (const article of assessmentArticles(found.course)) {
+            if (get(article, '_isAssessmentComplete')) continue;
+            const id = get(article, '_id');
+            const shown = findDeep(doc, el => visible(el) && el.model && typeof el.model.get === 'function' &&
+                (get(el.model, '_isQuestionType') || /adaptiveStartScreen/.test(get(el.model, '_component') || '')) && belongsTo(el.model, id));
+            if (shown) return id;
+        }
+        return null;
+    }
+
+    async function answerAssessment(articleId) {
+        const log = {};
+        const current = currentArticle(articleId);
+        if (!current) return { ready: false };
+        const questionShown = () => {
+            const again = currentArticle(articleId);
+            return again && findDeep(again.doc, el => visible(el) && el.model && typeof el.model.get === 'function' && get(el.model, '_isQuestionType') && belongsTo(el.model, articleId));
+        };
+        if (!questionShown()) {
+            clickVisible(current.doc, el => el.matches('.start-button') && belongsTo((el.getRootNode().host || {}).model || current.article, articleId));
+            await waitFor(questionShown, 8000);
+        }
+        await prefetchAnswers(articleId);
+        await answerQuestions(articleId, log);
+        // Questions skipped before ("Skip", "Skip All") are reached through the question strip (Q1, Q2…).
+        const strip = () => { const again = currentArticle(articleId); return again ? allElements(again.doc).filter(el => visible(el) && el.matches('button.block-button')) : []; };
+        const unanswered = () => { const again = currentArticle(articleId); return again ? again.article.getAllDescendantModels(true).filter(m => get(m, '_isQuestionType') && !get(m, '_isSubmitted')).length : 0; };
+        for (let i = 0; i < strip().length && unanswered(); i++) {
+            strip()[i].click();
+            await sleep(800);
+            await answerQuestions(articleId, log);
+        }
+        const after = currentArticle(articleId);
+        const ready = !!(after && findDeep(after.doc, el => el.id === 'confirm-exam' && visible(el)));
+        return { ready: true, ...log, confirm: ready, left: unanswered() };
+    }
+
     // "Check Your Understanding" activities are practice: they are not part of the course grade.
     const PRACTICE = /check your understanding|проверьте (себя|свои знания|своё понимание)|проверка понимания|compruebe su comprensión/i;
     const isPractice = article => PRACTICE.test(articleState(article).title) || get(article, '_assessment')?._assessmentWeight === 0;
@@ -410,6 +461,8 @@
             if (data.request === 'complete') result = await completeModule();
             else if (data.request === 'quizzes') result = await runQuizzes(data.options || {});
             else if (data.request === 'texts') result = texts();
+            else if (data.request === 'activeAssessment') result = { ready: true, articleId: activeAssessment() };
+            else if (data.request === 'answerAssessment') result = await answerAssessment(data.options.articleId);
             else result = status();
         } catch (error) {
             result = { ready: false, error: error.message };

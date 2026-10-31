@@ -427,9 +427,28 @@
         return solution.content || '';
     }
 
+    // The quiz or exam open on the screen (Check Your Understanding, module quiz, checkpoint exam): every question
+    // is answered and submitted one after another (no need for "Skip All" first); the "Submit My Assessment" screen
+    // at the end is left to the learner. Returns null when no assessment is open.
+    async function solveAssessment() {
+        if (!isTop) return null;
+        const active = await askMain('activeAssessment', 3000);
+        if (!active?.articleId) return null;
+        ui.show('info', tr('netacadExamSolving'));
+        const started = performance.now();
+        const result = await askMain('answerAssessment', 60 * 60 * 1000, { articleId: active.articleId });
+        const sec = ((performance.now() - started) / 1000).toFixed(0);
+        console.log('[Naki] NetAcad assessment answered:', result);
+        const answered = result?.answered || 0;
+        if (result?.confirm) ui.show('success', tr('netacadExamReady', { n: answered, sec }), { duration: 0 });
+        else ui.show(answered ? 'info' : 'error', tr('netacadExamPartial', { n: answered, left: result?.left ?? '?' }), { duration: 0 });
+        return answered > 0;
+    }
+
     // Returns true when at least one answer was selected (the quiz autopilot relies on it).
-    async function solve() {
-        if (state.solving) {
+    // nested: asked by netacad-main.js for one question while an assessment is being answered.
+    async function solve({ nested = false } = {}) {
+        if (state.solving && !nested) {
             ui.show('info', tr('toastBusySolve'), { duration: 2500 });
             return false;
         }
@@ -437,9 +456,13 @@
             ui.show('error', tr('toastNoKey'), { duration: 8000 });
             return false;
         }
-        state.solving = true;
+        if (!nested) state.solving = true;
         ui.render();
         try {
+            if (!nested) {
+                const assessment = await solveAssessment();
+                if (assessment !== null) return assessment;
+            }
             const questions = findQuestions();
             console.log('[Naki] NetAcad questions:', questions.map(({ apply, ...q }) => q));
             if (!questions.length) {
@@ -490,7 +513,7 @@
             ui.show('error', tr('toastSolveError', { error: error.message }));
             return false;
         } finally {
-            state.solving = false;
+            if (!nested) state.solving = false;
             ui.render();
         }
     }
@@ -978,7 +1001,7 @@
         });
         window.addEventListener('message', async event => {
             if (event.source !== window || event.data?.channel !== MAIN_CHANNEL || event.data.event !== 'need-ai') return;
-            const ok = await solve().catch(() => false);
+            const ok = await solve({ nested: true }).catch(() => false);
             window.postMessage({ channel: MAIN_CHANNEL, aiDone: event.data.questionId, ok }, window.location.origin);
         });
     }
