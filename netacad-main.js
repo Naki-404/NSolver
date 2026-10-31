@@ -375,8 +375,10 @@
             clickVisible(fresh.doc, el => el.matches('.start-button') && belongsTo((el.getRootNode().host || {}).model || fresh.article, articleId));
             await sleep(1200);
             log.attempts++;
-            await prefetchAnswers(articleId);
-            await answerQuestions(articleId, log);
+            if (!await answerAllInOrder(articleId, log)) {
+                await prefetchAnswers(articleId);
+                await answerQuestions(articleId, log);
+            }
             if (!await confirmSubmission(articleId)) {
                 const after = currentArticle(articleId);
                 return { ...log, ...(after ? articleState(after.article) : state), error: 'not submitted' };
@@ -403,6 +405,82 @@
         return null;
     }
 
+    // Exams with "Skip All" (checkpoint exams load one question at a time): Skip All brings every question at once
+    // (each with its answer in the course data), the answers of all questions are ready before the first one is
+    // touched (data → question bank → one request to the model), then Q1, Q2… are opened from the question strip and
+    // answered in order, up to the "Submit Page". Returns null when the assessment has no Skip All.
+    const inViewport = (doc, el) => {
+        const box = el.getBoundingClientRect();
+        return box.width > 0 && box.height > 0 && box.left > -5 && box.left < doc.defaultView.innerWidth - 5;
+    };
+    const questionModels = articleId => {
+        const current = currentArticle(articleId);
+        return current ? current.article.getAllDescendantModels(true).filter(m => get(m, '_isQuestionType')) : [];
+    };
+
+    async function answerAllInOrder(articleId, log) {
+        let current = currentArticle(articleId);
+        const skipAll = current && findDeep(current.doc, el => el.id === 'skip-all-question' && belongsTo((el.getRootNode().host || {}).model || current.article, articleId));
+        if (!skipAll) return null;
+        if (!skipAll.checked) {
+            skipAll.click();
+            // Every question arrives; the strip ends with the "Submit Page".
+            let count = -1;
+            for (let i = 0; i < 40; i++) {
+                await sleep(500);
+                const now = questionModels(articleId).length;
+                current = currentArticle(articleId);
+                const reviewShown = current && findDeep(current.doc, el => el.matches('button.block-button.review-screen') || (el.id === 'confirm-exam' && visible(el)));
+                if (reviewShown && now === count) break;
+                count = now;
+            }
+        }
+        // All answers first.
+        await prefetchAnswers(articleId);
+        const wantedFor = model => {
+            const items = get(model, '_items') || [];
+            if (items.length && items.every(item => typeof item._shouldBeSelected === 'boolean')) { log.fromData = (log.fromData || 0) + 1; return items.map(item => item._shouldBeSelected); }
+            const batch = batchAnswers.get(get(model, '_id'));
+            if (batch) { log.ai = (log.ai || 0) + 1; return items.map((_, i) => batch.includes(i)); }
+            return null;
+        };
+        const strip = () => {
+            const again = currentArticle(articleId);
+            return again ? allElements(again.doc).filter(el => el.matches('button.block-button') && /^\s*Q\d+\s*$/.test(el.textContent)) : [];
+        };
+        const buttons = strip();
+        for (let i = 0; i < buttons.length; i++) {
+            strip()[i].click();
+            // The question of that strip button slides into view.
+            const view = await waitFor(() => {
+                const again = currentArticle(articleId);
+                return again && allElements(again.doc).find(el => el.model && typeof el.model.get === 'function' && get(el.model, '_isQuestionType') &&
+                    /-VIEW$/.test(el.tagName) && el.tagName !== 'HEADING-VIEW' && belongsTo(el.model, articleId) && inViewport(again.doc, el));
+            }, 6000);
+            if (!view) continue;
+            const doc = currentArticle(articleId).doc;
+            const wanted = wantedFor(view.model);
+            if (wanted) {
+                await selectOptions(doc, get(view.model, '_id'), wanted);
+                log.answered = (log.answered || 0) + 1;
+            } else {
+                // Not a choice question or no answer: the solver of netacad.js looks at the screen.
+                log.ai = (log.ai || 0) + 1;
+                await askAi(get(view.model, '_id'));
+                log.answered = (log.answered || 0) + 1;
+            }
+            await sleep(250);
+            // Some exams still want the per-question Submit after the answer.
+            const submit = allElements(doc).find(el => el.matches('button.submit-button') && !el.disabled && visible(el) && inViewport(doc, el));
+            if (submit) { submit.click(); await sleep(400); }
+        }
+        // The "Submit Page" with the confirmation.
+        const review = allElements(currentArticle(articleId)?.doc || document).find(el => el.matches('button.block-button.review-screen'));
+        if (review) review.click();
+        await waitFor(() => { const again = currentArticle(articleId); return again && findDeep(again.doc, el => el.id === 'confirm-exam' && visible(el)); }, 6000);
+        return log;
+    }
+
     async function answerAssessment(articleId) {
         const log = {};
         const current = currentArticle(articleId);
@@ -415,19 +493,14 @@
             clickVisible(current.doc, el => el.matches('.start-button') && belongsTo((el.getRootNode().host || {}).model || current.article, articleId));
             await waitFor(questionShown, 8000);
         }
-        await prefetchAnswers(articleId);
-        await answerQuestions(articleId, log);
-        // Questions skipped before ("Skip", "Skip All") are reached through the question strip (Q1, Q2…).
-        const strip = () => { const again = currentArticle(articleId); return again ? allElements(again.doc).filter(el => visible(el) && el.matches('button.block-button')) : []; };
-        const unanswered = () => { const again = currentArticle(articleId); return again ? again.article.getAllDescendantModels(true).filter(m => get(m, '_isQuestionType') && !get(m, '_isSubmitted')).length : 0; };
-        for (let i = 0; i < strip().length && unanswered(); i++) {
-            strip()[i].click();
-            await sleep(800);
+        if (!await answerAllInOrder(articleId, log)) {
+            // No Skip All: one question after another as they come.
+            await prefetchAnswers(articleId);
             await answerQuestions(articleId, log);
         }
         const after = currentArticle(articleId);
         const ready = !!(after && findDeep(after.doc, el => el.id === 'confirm-exam' && visible(el)));
-        return { ready: true, ...log, confirm: ready, left: unanswered() };
+        return { ready: true, ...log, confirm: ready, left: questionModels(articleId).length - (log.answered || 0) };
     }
 
     // "Check Your Understanding" activities are practice: they are not part of the course grade.
