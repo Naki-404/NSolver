@@ -114,6 +114,21 @@
         return parts.filter(Boolean).join(' ');
     }
 
+    // A question of the course data: its text, options and, when the data has them, the correct options.
+    function questionEntry(model) {
+        const items = get(model, '_items') || [];
+        const known = items.length > 0 && items.every(item => typeof item._shouldBeSelected === 'boolean') && items.some(item => item._shouldBeSelected);
+        return {
+            id: get(model, '_id'),
+            component: String(get(model, '_component') || ''),
+            question: plain(get(model, 'body')) || plain(get(model, 'displayTitle') || get(model, 'title')),
+            options: items.map(item => plain(item.text || item.title || item.body)),
+            multiple: (get(model, '_selectable') || 1) > 1 || items.filter(item => item._shouldBeSelected).length > 1,
+            correct: known ? items.filter(item => item._shouldBeSelected).map(item => plain(item.text || item.title || item.body)) : null
+        };
+    }
+    const isChoice = entry => /mcq/i.test(entry.component) && entry.options.length >= 2 && entry.options.every(Boolean) && entry.question;
+
     function texts() {
         const found = findCourse();
         if (!found) return { ready: false };
@@ -124,7 +139,10 @@
             title: plain(get(page, 'displayTitle') || get(page, 'title')) || String(get(page, '_id')),
             text: page.getAllDescendantModels(true).filter(m => get(m, '_type') === 'component').map(componentText).filter(Boolean).join('\n')
         })).filter(doc => doc.text.length > 40);
-        return { ready: true, courseId: courseOf(urls.pop() || ''), packageId: packageId(win), title: String(get(model, 'title') || ''), docs };
+        // Questions with known answers (Check Your Understanding and others): quizzes and checkpoint exams reuse them.
+        const qa = model.getAllDescendantModels(true).filter(m => get(m, '_isQuestionType')).map(questionEntry)
+            .filter(entry => entry.correct && isChoice(entry)).map(({ question, options, correct }) => ({ q: question, options, correct }));
+        return { ready: true, courseId: courseOf(urls.pop() || ''), packageId: packageId(win), title: String(get(model, 'title') || ''), docs, qa };
     }
 
     // ---------------------------------------------------------------- quizzes (Adapt assessments)
@@ -217,21 +235,49 @@
         });
     }
 
+    // All questions of an assessment without answers in the data go to netacad.js at once: it answers from the
+    // course's question bank (materials base) and asks the model about the rest in one request, not one per question.
+    const batchAnswers = new Map(); // question id → option indices
+    function askAiBatch(questions) {
+        return new Promise(resolve => {
+            const id = `batch-${Date.now()}`;
+            const timer = setTimeout(() => { aiRequests.delete(id); resolve(null); }, 240000);
+            aiRequests.set(id, answers => { clearTimeout(timer); resolve(answers); });
+            window.postMessage({ channel: CHANNEL, event: 'need-ai-batch', batchId: id, questions }, window.location.origin);
+        });
+    }
+
+    async function prefetchAnswers(articleId) {
+        const current = currentArticle(articleId);
+        if (!current) return;
+        const questions = current.article.getAllDescendantModels(true).filter(m => get(m, '_isQuestionType')).map(questionEntry)
+            .filter(entry => !entry.correct && isChoice(entry) && !batchAnswers.has(entry.id))
+            .map(({ id, question, options, multiple }) => ({ id, question, options, multiple }));
+        if (!questions.length) return;
+        const answers = await askAiBatch(questions);
+        for (const [id, indices] of Object.entries(answers || {})) if (Array.isArray(indices) && indices.length) batchAnswers.set(id, indices);
+    }
+
     // Options are labelled "<question id>-<index>-label" (inputs "-input").
-    async function answerFromData(doc, question) {
-        const id = get(question, '_id');
-        const items = get(question, '_items') || [];
-        if (!items.length || !items.every(item => typeof item._shouldBeSelected === 'boolean')) return false;
-        for (const [i, item] of items.entries()) {
+    async function selectOptions(doc, id, wanted) {
+        for (let i = 0; i < wanted.length; i++) {
             const label = findDeep(doc, el => el.id === `${id}-${i}-label`);
             if (!label) return false;
             const input = label.getRootNode().querySelector(`[id="${id}-${i}-input"]`);
-            if (!!(input && input.checked) !== item._shouldBeSelected) {
+            if (!!(input && input.checked) !== wanted[i]) {
                 label.click();
                 await sleep(60);
             }
         }
         return true;
+    }
+
+    async function answerFromData(doc, question) {
+        const id = get(question, '_id');
+        const items = get(question, '_items') || [];
+        if (items.length && items.every(item => typeof item._shouldBeSelected === 'boolean')) return selectOptions(doc, id, items.map(item => item._shouldBeSelected));
+        if (batchAnswers.has(id)) return selectOptions(doc, id, items.map((_, i) => batchAnswers.get(id).includes(i)));
+        return false;
     }
 
     async function submitQuestion(doc, view) {
@@ -323,6 +369,7 @@
             clickVisible(fresh.doc, el => el.matches('.start-button') && belongsTo((el.getRootNode().host || {}).model || fresh.article, articleId));
             await sleep(1200);
             log.attempts++;
+            await prefetchAnswers(articleId);
             await answerQuestions(articleId, log);
             if (!await confirmSubmission(articleId)) {
                 const after = currentArticle(articleId);
@@ -353,7 +400,7 @@
         const data = event.data;
         if (event.source !== window || !data || data.channel !== CHANNEL) return;
         if (data.aiDone && aiRequests.has(data.aiDone)) {
-            aiRequests.get(data.aiDone)(!!data.ok);
+            aiRequests.get(data.aiDone)(data.answers !== undefined ? data.answers : !!data.ok);
             aiRequests.delete(data.aiDone);
             return;
         }

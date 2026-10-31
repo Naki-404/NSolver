@@ -24,6 +24,7 @@ var Naki = (function () {
         courseQueueLinks: '', // Coursera course / specialization links for "Go through courses", one per line
         skipDiscussions: false,
         netacadButton: true,
+        netacadCheckpoints: true, // NetAcad autopilot: checkpoint exams too (never the final exam)
         autopilotRetakes: 2, // automatic retakes of a failed quiz: 0 (leave it to the user), 2 or 3
         autopilotPeer: true, // Coursera autopilot: submit graded peer-reviewed assignments and review classmates
         autopilotProgramming: true, // Coursera autopilot: graded programming assignments (Coursera Labs notebooks)
@@ -160,6 +161,8 @@ var Naki = (function () {
             statusNetacad: 'Cisco NetAcad: курс открыт',
             statusNetacadNoAccess: 'NetAcad: Chrome не пускает расширение на страницу. Обновите вкладку.',
             netacadButton: 'Кнопка на странице', netacadButtonHint: 'Плавающая кнопка «Решить» в углу NetAcad',
+            netacadCheckpoints: 'Checkpoint exams', netacadCheckpointsHint: 'Автосолвер сдаёт и промежуточные экзамены; финальный экзамен не трогается',
+            netacadBatch: 'Квиз: из данных курса {bank}, у модели {ai} (одним запросом)…',
             netacadSolve: 'Решить', netacadClose: 'Закрыть',
             netacadNoQuestions: 'На странице нет неотвеченных вопросов. Откройте тест (или страницу с вопросами) и повторите.',
             netacadPartial: 'Проставлено {applied} из {total} за {sec} с. Отметьте вручную:',
@@ -173,7 +176,7 @@ var Naki = (function () {
             netacadSkipComponents: 'компоненты', netacadSkipVideos: 'видео',
             // quiz autopilot
             autopilotTitle: 'Автосолвер квизов', autopilotRun: 'Пройти весь курс', autopilotConfirm: 'Нажмите ещё раз: квизы будут отправлены',
-            autopilotHint: 'Только задания, которые идут в оценку, по порядку, с отправкой. NetAcad: ещё и материалы; экзамены не трогаются',
+            autopilotHint: 'Только задания, которые идут в оценку, по порядку, с отправкой. NetAcad: ещё и материалы и checkpoint-экзамены; финальный экзамен не трогается',
             autopilotPeer: 'Задания с взаимной проверкой', autopilotPeerHint: 'Coursera: сдать работу (текст или файл) и проверить работы других, сколько требует курс',
             autopilotProgramming: 'Programming assignments', autopilotProgrammingHint: 'Coursera Labs (Jupyter): написать код, прогнать ноутбук, исправить ошибки и нажать Submit Assignment',
             labsNoNotebook: 'Ноутбук ещё не загрузился.', labsNoTasks: 'В ноутбуке не найдено ячеек с заданиями.',
@@ -287,6 +290,8 @@ var Naki = (function () {
             statusNetacad: 'Cisco NetAcad: course open',
             statusNetacadNoAccess: 'NetAcad: Chrome blocks the extension on this page. Reload the tab.',
             netacadButton: 'On-page button', netacadButtonHint: 'Floating "Solve" button in the NetAcad corner',
+            netacadCheckpoints: 'Checkpoint exams', netacadCheckpointsHint: 'The autopilot takes checkpoint exams too; the final exam is left alone',
+            netacadBatch: 'Quiz: {bank} from the course data, {ai} from the model (one request)…',
             netacadSolve: 'Solve', netacadClose: 'Close',
             netacadNoQuestions: 'No unanswered questions on the page. Open the quiz (or a page with questions) and try again.',
             netacadPartial: 'Filled {applied} of {total} in {sec}s. Select these yourself:',
@@ -299,7 +304,7 @@ var Naki = (function () {
             netacadSkipNothing: 'No course materials found. Open a course module and try again.',
             netacadSkipComponents: 'components', netacadSkipVideos: 'videos',
             autopilotTitle: 'Quiz autopilot', autopilotRun: 'Go through the course', autopilotConfirm: 'Click again: quizzes will be submitted',
-            autopilotHint: 'Only the work that counts toward the grade, in order, submitted. NetAcad: materials too; exams are left alone',
+            autopilotHint: 'Only the work that counts toward the grade, in order, submitted. NetAcad: materials and checkpoint exams too; the final exam is left alone',
             autopilotPeer: 'Peer-reviewed assignments', autopilotPeerHint: 'Coursera: submit the work (text or a file) and review as many classmates as the course asks',
             autopilotProgramming: 'Programming assignments', autopilotProgrammingHint: 'Coursera Labs (Jupyter): write the code, run the notebook, fix errors and press Submit Assignment',
             labsNoNotebook: 'The notebook has not loaded yet.', labsNoTasks: 'No task cells found in the notebook.',

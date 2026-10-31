@@ -87,6 +87,10 @@
                     <label class="label-text" for="netacadButton"><span data-i18n="netacadButton"></span><small data-i18n="netacadButtonHint"></small></label>
                     <label class="switch"><input type="checkbox" id="netacadButton"><span class="track"></span></label>
                 </div>
+                <div class="row">
+                    <label class="label-text" for="netacadCheckpoints"><span data-i18n="netacadCheckpoints"></span><small data-i18n="netacadCheckpointsHint"></small></label>
+                    <label class="switch"><input type="checkbox" id="netacadCheckpoints"><span class="track"></span></label>
+                </div>
             </section>
         </div>
 
@@ -384,6 +388,7 @@
         $('courseContext').checked = settings.courseContext;
         $('skipDiscussions').checked = settings.skipDiscussions;
         $('netacadButton').checked = settings.netacadButton;
+        $('netacadCheckpoints').checked = settings.netacadCheckpoints;
         $('autopilotRetakes').value = String(settings.autopilotRetakes);
         if (document.activeElement !== $('queueLinks')) $('queueLinks').value = settings.courseQueueLinks;
         $('autopilotPeer').checked = settings.autopilotPeer;
@@ -558,6 +563,7 @@
     $('skipDiscussions').addEventListener('change', () => Naki.saveSettings({ skipDiscussions: $('skipDiscussions').checked }));
     $('courseContext').addEventListener('change', () => Naki.saveSettings({ courseContext: $('courseContext').checked }));
     $('netacadButton').addEventListener('change', () => Naki.saveSettings({ netacadButton: $('netacadButton').checked }));
+    $('netacadCheckpoints').addEventListener('change', () => Naki.saveSettings({ netacadCheckpoints: $('netacadCheckpoints').checked }));
 
     let keyVisible = false;
     $('toggleKey').addEventListener('click', () => {

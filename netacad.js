@@ -446,17 +446,28 @@
                 ui.show('info', tr('netacadNoQuestions'), { duration: 8000 });
                 return false;
             }
+            const started = performance.now();
+            // Questions the course data already answers (the bank) are selected without the model.
+            const bank = (await saveModuleTexts().catch(() => null))?.qa || [];
+            let applied = 0;
+            const toModel = [];
+            for (const question of questions) {
+                const known = question.type === 'mcq' ? bankAnswer(bank, question.question, question.options) : null;
+                if (known && await question.apply(known).catch(() => false)) applied++;
+                else toModel.push(question);
+            }
             const settings = state.settings;
             const options = { provider: settings.provider, apiKey: Naki.activeKey(settings), modelId: Naki.activeModel(settings), lang: settings.lang };
-            options.contextFor = await courseContext();
-            ui.show('info', tr('toastSolving', { auto: '', n: questions.length, model: options.modelId }) + (options.contextFor ? tr('toastWithMaterials') : ''));
-            const started = performance.now();
-            const solutions = await ModelProvider.solveQuizQuestions(questions.map(({ apply, ...q }) => q), options);
-            console.log('[Naki] NetAcad solutions:', solutions);
+            let solutions = [];
+            if (toModel.length) {
+                options.contextFor = await courseContext();
+                ui.show('info', tr('toastSolving', { auto: '', n: toModel.length, model: options.modelId }) + (options.contextFor ? tr('toastWithMaterials') : ''));
+                solutions = await ModelProvider.solveQuizQuestions(toModel.map(({ apply, ...q }) => q), options);
+            }
+            console.log('[Naki] NetAcad solutions:', { fromBank: applied, solutions });
 
-            let applied = 0;
             const missed = [];
-            for (const [i, question] of questions.entries()) {
+            for (const [i, question] of toModel.entries()) {
                 const solution = solutions[i];
                 let ok = false;
                 try {
@@ -650,14 +661,19 @@
     // exam, final exam, survey… Those must never be opened (that could start an exam attempt): modules only.
     const MODULE_TITLE = /^\s*(module|модуль|módulo|modul|modulo)\s*\d+/i;
     const NOT_A_MODULE = /exam|final|survey|assessment|экзамен|опрос/i;
+    // Checkpoint exams count toward the grade; the final exam, practice final and surveys are never opened.
+    const CHECKPOINT = /checkpoint|контрольн/i;
+    const NOT_A_CHECKPOINT = /final|survey|feedback|итогов|опрос/i;
 
-    function outlineModules() {
+    function outlineModules({ checkpoints = false } = {}) {
         return [...document.querySelectorAll('button[id^="node-button-"]')]
-            .filter(button => MODULE_TITLE.test(button.textContent) && !NOT_A_MODULE.test(button.textContent))
+            .filter(button => (MODULE_TITLE.test(button.textContent) && !NOT_A_MODULE.test(button.textContent)) ||
+                (checkpoints && CHECKPOINT.test(button.textContent) && !NOT_A_CHECKPOINT.test(button.textContent)))
             .map(button => {
                 const percent = button.textContent.match(/(\d+)\s*%/);
                 return {
                     id: button.id.slice('node-button-'.length),
+                    checkpoint: CHECKPOINT.test(button.textContent) && !MODULE_TITLE.test(button.textContent),
                     button,
                     title: (button.textContent.match(/Module\s+\d+[^%]*?(?=\d+\s*%|$)/i)?.[0] || button.textContent).trim().slice(0, 60),
                     percent: percent ? Number(percent[1]) : null
@@ -672,13 +688,13 @@
         }
         const first = document.querySelector(`[id="node-${module.id}"] button[id^="submodule-button-"]`) ||
             document.getElementById('submodule-button-' + module.id);
-        if (!first) return null;
-        first.click();
+        if (first) first.click();
+        else if (!module.checkpoint) return null; // an exam node may open on its own button (clicked above)
         for (let i = 0; i < 50; i++) {
             await sleep(400);
             const status = await askMain('status', 3000);
             // Right after a switch the previous module may still be rendered: the course title must match too.
-            if (status?.ready && status.packageId === module.id && sameModuleTitle(status.title, module.title)) return status;
+            if (status?.ready && status.packageId === module.id && (module.checkpoint || sameModuleTitle(status.title, module.title))) return status;
         }
         return null;
     }
@@ -710,18 +726,89 @@
     // Saves the texts of the loaded module; returns { id, module, docs } of the whole course, or null.
     async function saveModuleTexts() {
         const texts = await askMain('texts', 8000);
-        if (!texts?.ready || !texts.courseId || !texts.docs?.length) return null;
+        if (!texts?.ready || !texts.courseId) return null;
         const id = Materials.courseId(`netacad-${texts.courseId}`);
         const module = moduleIndexOf(texts.packageId, texts.title);
         const stored = await Materials.read(id);
+        const qa = mergeBank(stored?.qa || [], texts.qa || []);
+        const qaPackages = [...new Set([...(stored?.qaPackages || []), texts.packageId].filter(Boolean))];
+        if (!texts.docs?.length) {
+            // A checkpoint exam package: no pages, maybe questions with answers.
+            if (stored) await Materials.save(id, { ...stored, qa, qaPackages });
+            return stored ? { id, module, docs: stored.docs, qa, packageId: texts.packageId } : { id, module, docs: [], qa, packageId: texts.packageId };
+        }
         const previous = stored?.docs || [];
         const base = (module ?? 99) * 1000;
         const fresh = texts.docs.map((doc, i) => ({ order: base + i, type: 'page', title: doc.title, module, text: doc.text }));
         const merged = Materials.mergeManual(fresh, previous.filter(doc => doc.type === 'note' || doc.module === module));
         const docs = [...previous.filter(doc => doc.type !== 'note' && doc.module !== module), ...merged].sort((a, b) => a.order - b.order);
-        await Materials.save(id, { savedAt: Date.now(), name: stored?.name || courseName(texts.title), site: 'netacad', docs, ...(stored?.edited ? { edited: true } : {}) });
+        await Materials.save(id, { savedAt: Date.now(), name: stored?.name || courseName(texts.title), site: 'netacad', docs, qa, qaPackages, ...(stored?.edited ? { edited: true } : {}) });
         contextCache = null;
-        return { id, module, docs, packageId: texts.packageId };
+        return { id, module, docs, qa, packageId: texts.packageId };
+    }
+
+    // ------------------------------------------------------------------ question bank
+    // The course data of every module holds the correct options of its own questions (Check Your Understanding and
+    // others). Module quizzes and checkpoint exams reuse many of these questions, and their own data has no answers:
+    // such questions are answered from the bank, without the model.
+
+    const bankNorm = text => String(text || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+    const bankKey = entry => `${bankNorm(entry.q)}|${entry.options.map(bankNorm).sort().join('|')}`;
+    function mergeBank(previous, fresh) {
+        const byKey = new Map(previous.map(entry => [bankKey(entry), entry]));
+        for (const entry of fresh) byKey.set(bankKey(entry), entry);
+        return [...byKey.values()];
+    }
+    function similarity(a, b) {
+        const left = new Set(bankNorm(a).split(' ').filter(word => word.length > 1));
+        const right = new Set(bankNorm(b).split(' ').filter(word => word.length > 1));
+        if (!left.size || !right.size) return 0;
+        let same = 0;
+        for (const word of left) if (right.has(word)) same++;
+        return same / (left.size + right.size - same);
+    }
+    const sameText = (a, b) => {
+        const x = bankNorm(a), y = bankNorm(b);
+        return x === y || (Math.min(x.length, y.length) > 25 && (x.includes(y) || y.includes(x))) || similarity(a, b) >= 0.85;
+    };
+    // Indices of the correct options of a question from the bank, or null when the bank does not know it.
+    function bankAnswer(bank, question, options) {
+        for (const entry of bank) {
+            if (!sameText(entry.q, question)) continue;
+            const indices = entry.correct.map(text => {
+                const exact = options.findIndex(option => bankNorm(option) === bankNorm(text));
+                if (exact >= 0) return exact;
+                const scored = options.map((option, i) => [similarity(option, text), i]).sort((a, b) => b[0] - a[0])[0];
+                return scored && scored[0] >= 0.8 ? scored[1] : -1;
+            });
+            if (indices.length && indices.every(i => i >= 0) && new Set(indices).size === indices.length) return indices.sort((a, b) => a - b);
+        }
+        return null;
+    }
+
+    // A whole quiz at once (netacad-main.js, before the first question): the bank first, then one request to the model.
+    async function answerBatch(questions) {
+        const bank = (await saveModuleTexts().catch(() => null))?.qa || [];
+        const answers = {};
+        const unknown = [];
+        for (const question of questions) {
+            const known = bankAnswer(bank, question.question, question.options);
+            if (known) answers[question.id] = known;
+            else unknown.push(question);
+        }
+        ui.show('info', tr('netacadBatch', { bank: questions.length - unknown.length, ai: unknown.length }));
+        if (unknown.length && Naki.activeKey(state.settings)) {
+            const settings = state.settings;
+            const options = { provider: settings.provider, apiKey: Naki.activeKey(settings), modelId: Naki.activeModel(settings), lang: settings.lang, contextFor: await courseContext() };
+            const solutions = await ModelProvider.solveQuizQuestions(unknown.map(q => ({ type: 'mcq', multiple: q.multiple, question: q.question, options: q.options })), options)
+                .catch(error => { console.warn('[Naki] NetAcad quiz answers failed:', error.message); return []; });
+            unknown.forEach((question, i) => {
+                const indices = solutions[i]?.correctOptionsIndex;
+                if (indices?.length) answers[question.id] = indices;
+            });
+        }
+        console.log('[Naki] NetAcad quiz answers:', { questions: questions.length, fromBank: questions.length - unknown.length, fromModel: unknown.length });
+        return answers;
     }
 
     // contextFor(questions) for ModelProvider, or null when the course materials are off or unavailable.
@@ -842,8 +929,14 @@
                 return;
             }
             const retakes = state.settings.autopilotRetakes;
-            const outline = outlineModules().filter(module => module.percent === null || module.percent < 100);
-            const modules = outlineModules().length ? outline : [null]; // a course frame without the player outline
+            const checkpoints = state.settings.netacadCheckpoints;
+            // Finished modules are opened too when the question bank has not seen them yet: checkpoint exams are
+            // answered from it.
+            const first = await saveModuleTexts().catch(() => null);
+            const harvested = new Set(first ? ((await Materials.read(first.id))?.qaPackages || []) : []);
+            const done = module => module.percent !== null && module.percent >= 100;
+            const outline = outlineModules({ checkpoints }).filter(module => !done(module) || (checkpoints && !module.checkpoint && !harvested.has(module.id)));
+            const modules = outlineModules({ checkpoints }).length ? outline : [null]; // a course frame without the player outline
             const summary = { modules: 0, materials: 0, passed: 0, failed: [] };
             for (const [i, module] of modules.entries()) {
                 if (state.autopilotStop) break;
@@ -854,6 +947,7 @@
                     continue;
                 }
                 await saveModuleTexts().catch(() => null);
+                if (module && done(module)) continue; // finished: only its questions were wanted
                 const materials = await askMain('complete', 120000);
                 summary.materials += materials?.done || 0;
                 const quizzes = await askMain('quizzes', 30 * 60 * 1000, { retakes });
@@ -877,6 +971,11 @@
 
     // netacad-main.js asks for the AI solver when a quiz question has no answer data.
     if (isTop) {
+        window.addEventListener('message', async event => {
+            if (event.source !== window || event.data?.channel !== MAIN_CHANNEL || event.data.event !== 'need-ai-batch') return;
+            const answers = await answerBatch(event.data.questions || []).catch(() => ({}));
+            window.postMessage({ channel: MAIN_CHANNEL, aiDone: event.data.batchId, answers }, window.location.origin);
+        });
         window.addEventListener('message', async event => {
             if (event.source !== window || event.data?.channel !== MAIN_CHANNEL || event.data.event !== 'need-ai') return;
             const ok = await solve().catch(() => false);
