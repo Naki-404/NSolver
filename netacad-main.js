@@ -340,6 +340,26 @@
         return true;
     }
 
+    // After "Skip All" every question carries the toolbar's "Skip" flag (#skip-question): Submit then counts it as
+    // skipped (red in the strip) and moves on. Only a change of the selection clears the flag (clicking the checkbox
+    // itself skips to the next question), so an answer that was already selected is chosen again: another option
+    // and back for a single answer, the first wanted option off and on for several. Verified on the Cryptography
+    // checkpoint exam.
+    const skipFlagged = doc => !!findDeep(doc, el => el.id === 'skip-question' && el.checked);
+    async function clearSkip(doc, id, wanted) {
+        if (!skipFlagged(doc)) return true;
+        const label = i => findDeep(doc, el => el.id === `${id}-${i}-label`);
+        const right = wanted.indexOf(true);
+        const other = wanted.filter(Boolean).length > 1 ? right : wanted.indexOf(false);
+        if (right < 0 || other < 0 || !label(right) || !label(other)) return false;
+        label(other).click();
+        await sleep(150);
+        if (other !== right || !findDeep(doc, el => el.id === `${id}-${right}-input`)?.checked) label(right).click();
+        await sleep(150);
+        await selectOptions(doc, id, wanted); // whatever the clicks changed is set back
+        return !skipFlagged(doc);
+    }
+
     // The correct options from the course data, or null: data with every _shouldBeSelected false has no answer.
     function dataAnswer(model) {
         const items = get(model, '_items') || [];
@@ -357,7 +377,10 @@
     }
 
     async function submitQuestion(doc, view) {
-        if (clickVisible(doc, el => el.matches('button.submit-button') && !el.disabled)) return true;
+        // The Submit button is enabled only once the player took the answer: wait for it a little.
+        const ready = el => el.matches('button.submit-button') && !el.disabled && visible(el);
+        if (allElements(doc).some(el => el.matches('button.submit-button'))) await waitFor(() => allElements(doc).find(ready), 3000, 150);
+        if (clickVisible(doc, ready)) return true;
         // Classic Adapt: a Submit button inside the question itself.
         const inner = allElements(view.shadowRoot || view).find(el => visible(el) && el.matches('button') && /^\s*submit\s*$/i.test(el.textContent) && !el.disabled);
         if (inner) inner.click();
@@ -405,6 +428,9 @@
                 await askAi(id);
             }
             log.fromData = (log.fromData || 0) + (fromData ? 1 : 0);
+            const items = get(question, '_items') || [];
+            const wanted = dataAnswer(question) || (batchAnswers.has(id) ? items.map((_, i) => batchAnswers.get(id).includes(i)) : null);
+            if (wanted) await clearSkip(doc, id, wanted);
             await sleep(150);
             if (!await submitQuestion(doc, view)) return;
             log.answered = (log.answered || 0) + 1;
@@ -511,6 +537,8 @@
         const box = el.getBoundingClientRect();
         return box.width > 0 && box.height > 0 && box.left > -5 && box.left < doc.defaultView.innerWidth - 5;
     };
+    // The strip's last button opens the "Submit Page" (class review-screen-button).
+    const REVIEW_BUTTON = 'button.block-button.review-screen-button, button.block-button.review-screen';
     const questionModels = articleId => {
         const current = currentArticle(articleId);
         return current ? current.article.getAllDescendantModels(true).filter(m => get(m, '_isQuestionType')) : [];
@@ -528,7 +556,7 @@
                 await sleep(500);
                 const now = questionModels(articleId).length;
                 current = currentArticle(articleId);
-                const reviewShown = current && findDeep(current.doc, el => el.matches('button.block-button.review-screen') || (el.id === 'confirm-exam' && visible(el)));
+                const reviewShown = current && findDeep(current.doc, el => el.matches(REVIEW_BUTTON) || (el.id === 'confirm-exam' && visible(el)));
                 if (reviewShown && now === count) break;
                 count = now;
             }
@@ -549,34 +577,52 @@
             return again ? allElements(again.doc).filter(el => el.matches('button.block-button') && /^\s*Q\d+\s*$/.test(el.textContent)) : [];
         };
         const buttons = strip();
+        const models = questionModels(articleId); // in the order of the strip (verified on the Cryptography checkpoint)
+        // The questions slide sideways: for half a second after a strip click the previous questions still pass
+        // through the viewport. The view taken is the strip button's own question once it stopped moving.
+        const settledView = async target => {
+            let last = null;
+            return waitFor(() => {
+                const again = currentArticle(articleId);
+                const view = again && allElements(again.doc).find(el => el.model && typeof el.model.get === 'function' && get(el.model, '_isQuestionType') &&
+                    /-VIEW$/.test(el.tagName) && el.tagName !== 'HEADING-VIEW' && belongsTo(el.model, articleId) && inViewport(again.doc, el) &&
+                    (!target || get(el.model, '_id') === get(target, '_id')));
+                const left = view && Math.round(view.getBoundingClientRect().left);
+                const settled = view && last && last.view === view && last.left === left;
+                last = view ? { view, left } : null;
+                return settled ? view : null;
+            }, 8000, 200);
+        };
+        const unanswered = i => /\bhighlight\b/.test(strip()[i]?.className || ''); // red in the strip
         for (let i = 0; i < buttons.length; i++) {
             strip()[i].click();
-            // The question of that strip button slides into view.
-            const view = await waitFor(() => {
-                const again = currentArticle(articleId);
-                return again && allElements(again.doc).find(el => el.model && typeof el.model.get === 'function' && get(el.model, '_isQuestionType') &&
-                    /-VIEW$/.test(el.tagName) && el.tagName !== 'HEADING-VIEW' && belongsTo(el.model, articleId) && inViewport(again.doc, el));
-            }, 6000);
-            if (!view) continue;
+            const view = await settledView(buttons.length === models.length ? models[i] : null);
+            if (!view) { log.missed = (log.missed || 0) + 1; continue; }
             const doc = currentArticle(articleId).doc;
             const wanted = isMatching(view.model) ? null : wantedFor(view.model);
             if (isMatching(view.model)) {
                 if (await answerMatching(view)) { log.ai = (log.ai || 0) + 1; log.answered = (log.answered || 0) + 1; }
             } else if (wanted) {
                 await selectOptions(doc, get(view.model, '_id'), wanted);
+                await clearSkip(doc, get(view.model, '_id'), wanted);
                 log.answered = (log.answered || 0) + 1;
             } else {
                 // No answer for it (an unknown question type): left for the learner. The on-screen solver is not
                 // used here, every question of the row is rendered at once.
                 log.missed = (log.missed || 0) + 1;
             }
-            await sleep(250);
-            // Some exams still want the per-question Submit after the answer.
-            const submit = allElements(doc).find(el => el.matches('button.submit-button') && !el.disabled && visible(el) && inViewport(doc, el));
-            if (submit) { submit.click(); await sleep(400); }
+            // The per-question Submit turns the question green in the strip; it is enabled once the answer is in.
+            for (let attempt = 0; attempt < 3; attempt++) {
+                const submit = await waitFor(() => allElements(doc).find(el => el.matches('button.submit-button') && !el.disabled && visible(el) && inViewport(doc, el)), 3000, 150);
+                if (!submit) break;
+                submit.click();
+                if (await waitFor(() => !unanswered(i), 2000, 150)) break;
+            }
+            if (unanswered(i)) log.unsubmitted = (log.unsubmitted || 0) + 1;
+            await sleep(300);
         }
         // The "Submit Page" with the confirmation.
-        const review = allElements(currentArticle(articleId)?.doc || document).find(el => el.matches('button.block-button.review-screen'));
+        const review = allElements(currentArticle(articleId)?.doc || document).find(el => el.matches(REVIEW_BUTTON));
         if (review) review.click();
         await waitFor(() => { const again = currentArticle(articleId); return again && findDeep(again.doc, el => el.id === 'confirm-exam' && visible(el)); }, 6000);
         return log;
