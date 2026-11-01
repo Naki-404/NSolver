@@ -119,6 +119,7 @@ var Naki = (function () {
             courseContext: 'Учитывать материалы курса', courseContextHint: 'Тексты курса из базы материалов в запросе: точнее, но больше токенов',
             toastMaterials: 'Загружаю материалы курса: {done} из {total}…', toastMaterialsReady: 'Материалы курса загружены.',
             toastWithMaterials: ' (с материалами курса)',
+            toastBank: 'Банк вопросов курса: ответов {bank}, модели осталось {ai}…',
             toastMaterialsLoaded: 'Материалов курса в базе: {n}.',
             // materials base
             materialsTitle: 'База материалов', materialsSummary: 'Курсов: {courses} · {size}',
@@ -251,6 +252,7 @@ var Naki = (function () {
             courseContext: 'Use course materials', courseContextHint: 'Course texts from the materials base go into the prompt: more accurate, more tokens',
             toastMaterials: 'Loading course materials: {done} of {total}…', toastMaterialsReady: 'Course materials loaded.',
             toastWithMaterials: ' (with course materials)',
+            toastBank: 'Course question bank: {bank} answers, {ai} left for the model…',
             toastMaterialsLoaded: 'Course materials in the base: {n}.',
             materialsTitle: 'Materials base', materialsSummary: 'Courses: {courses} · {size}',
             materialsEmpty: 'Empty so far: materials are collected with the first quiz of a Coursera or NetAcad course.',

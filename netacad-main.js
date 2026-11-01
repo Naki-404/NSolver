@@ -114,6 +114,9 @@
         return parts.filter(Boolean).join(' ');
     }
 
+    // Options with a picture instead of text are named by the picture's alt text.
+    const optionText = item => plain(item.text || item.title || item.body) || plain(item._graphic?.alt);
+
     // A question of the course data: its text, options and, when the data has them, the correct options.
     function questionEntry(model) {
         const items = get(model, '_items') || [];
@@ -122,9 +125,9 @@
             id: get(model, '_id'),
             component: String(get(model, '_component') || ''),
             question: plain(get(model, 'body')) || plain(get(model, 'displayTitle') || get(model, 'title')),
-            options: items.map(item => plain(item.text || item.title || item.body)),
+            options: items.map(optionText),
             multiple: (get(model, '_selectable') || 1) > 1 || items.filter(item => item._shouldBeSelected).length > 1,
-            correct: known ? items.filter(item => item._shouldBeSelected).map(item => plain(item.text || item.title || item.body)) : null
+            correct: known ? items.filter(item => item._shouldBeSelected).map(optionText) : null
         };
     }
     const isChoice = entry => /mcq/i.test(entry.component) && entry.options.length >= 2 && entry.options.every(Boolean) && entry.question;
@@ -140,8 +143,13 @@
             text: page.getAllDescendantModels(true).filter(m => get(m, '_type') === 'component').map(componentText).filter(Boolean).join('\n')
         })).filter(doc => doc.text.length > 40);
         // Questions with known answers (Check Your Understanding and others): quizzes and checkpoint exams reuse them.
-        const qa = model.getAllDescendantModels(true).filter(m => get(m, '_isQuestionType')).map(questionEntry)
+        const questions = model.getAllDescendantModels(true).filter(m => get(m, '_isQuestionType'));
+        const qa = questions.map(questionEntry)
             .filter(entry => entry.correct && isChoice(entry)).map(({ question, options, correct }) => ({ q: question, options, correct }));
+        // Matching questions with their pairs in the data: one bank entry per item, worded like the exam's parts.
+        for (const part of questions.filter(isMatching).flatMap(matchingParts)) {
+            if (part.correct) qa.push({ q: part.question, options: part.options, correct: part.correct.map(i => part.options[i]) });
+        }
         return { ready: true, courseId: courseOf(urls.pop() || ''), packageId: packageId(win), title: String(get(model, 'title') || ''), docs, qa };
     }
 
@@ -241,20 +249,34 @@
     function askAiBatch(questions) {
         return new Promise(resolve => {
             const id = `batch-${Date.now()}`;
-            const timer = setTimeout(() => { aiRequests.delete(id); resolve(null); }, 240000);
+            // A final exam sends dozens of questions (several model requests): the wait grows with the batch.
+            const timer = setTimeout(() => { aiRequests.delete(id); resolve(null); }, Math.max(240000, 120000 + questions.length * 10000));
             aiRequests.set(id, answers => { clearTimeout(timer); resolve(answers); });
             window.postMessage({ channel: CHANNEL, event: 'need-ai-batch', batchId: id, questions }, window.location.origin);
         });
     }
 
-    // Matching questions (objectMatching: a dropdown of options per category). Secure exams shuffle the pairs in the
-    // data, so each category goes to the model as a single-choice question: "<stem> — <category>" with every option.
-    const isMatching = model => get(model, '_component') === 'objectMatching' && (get(model, 'categoryItems') || []).length > 0;
+    // Matching questions: a dropdown of options per item. objectMatching (categoryItems / optionItems; secure exams
+    // shuffle the pairs in the data, so the data never answers it) and the Adapt matching component (_items[] with
+    // their own _options[], _isCorrect in module data). Each item is a single-choice question
+    // "<stem> — Which option matches "<item>"?": the bank (filled from module data) or the model answers it.
+    const isObjectMatching = model => get(model, '_component') === 'objectMatching' && (get(model, 'categoryItems') || []).length > 0;
+    const isAdaptMatching = model => get(model, '_component') === 'matching' && (get(model, '_items') || []).some(item => Array.isArray(item._options));
+    const isMatching = model => isObjectMatching(model) || isAdaptMatching(model);
+    const matchingQuestion = (stem, label) => `${stem} — Which option matches "${label}"?`;
     function matchingParts(model) {
         const stem = plain(get(model, 'body')) || 'Match the items';
+        if (isAdaptMatching(model)) {
+            return (get(model, '_items') || []).map((item, k) => {
+                const label = plain(item.text || item.title);
+                const options = (item._options || []).map(option => plain(option.text));
+                const correct = (item._options || []).flatMap((option, i) => (option._isCorrect === true ? [i] : []));
+                return { id: `${get(model, '_id')}::${k}`, category: label, question: matchingQuestion(stem, label), options, multiple: false, correct: correct.length ? correct : null };
+            });
+        }
         const options = (get(model, 'optionItems') || []).map(item => plain(item.option));
         return (get(model, 'categoryItems') || []).map((item, k) => ({
-            id: `${get(model, '_id')}::${k}`, category: plain(item.category), question: `${stem} — Which option matches "${plain(item.category)}"?`, options, multiple: false
+            id: `${get(model, '_id')}::${k}`, category: plain(item.category), question: matchingQuestion(stem, plain(item.category)), options, multiple: false, correct: null
         }));
     }
 
@@ -266,24 +288,26 @@
             .filter(entry => !entry.correct && isChoice(entry) && !batchAnswers.has(entry.id))
             .map(({ id, question, options, multiple }) => ({ id, question, options, multiple }));
         for (const model of models.filter(isMatching)) {
-            for (const part of matchingParts(model)) if (!batchAnswers.has(part.id) && part.options.length) questions.push({ id: part.id, question: part.question, options: part.options, multiple: false });
+            for (const part of matchingParts(model)) if (!part.correct && !batchAnswers.has(part.id) && part.options.length) questions.push({ id: part.id, question: part.question, options: part.options, multiple: false });
         }
         if (!questions.length) return;
         const answers = await askAiBatch(questions);
         for (const [id, indices] of Object.entries(answers || {})) if (Array.isArray(indices) && indices.length) batchAnswers.set(id, indices);
     }
 
-    // A matching question on the screen: in each category's dropdown, the option the answers say.
+    // A matching question on the screen: in each item's dropdown, the option the data or the answers say.
     async function answerMatching(view) {
         const model = view.model;
         const parts = matchingParts(model);
-        const dropdowns = allElements(view.shadowRoot || view).filter(el => el.tagName === 'OBJECT-MATCHING-DROPDOWN-VIEW');
+        const inside = allElements(view.shadowRoot || view);
+        let dropdowns = inside.filter(el => el.tagName === 'OBJECT-MATCHING-DROPDOWN-VIEW');
+        if (!dropdowns.length) dropdowns = inside.filter(el => el.matches('.matching__item') && el.querySelector('button.dropdown__btn'));
         let done = 0;
         for (const dropdown of dropdowns) {
             const root = dropdown.shadowRoot || dropdown;
             const title = plain(root.querySelector('.matching__item-title_inner')?.textContent || '');
             const part = parts.find(entry => entry.category === title) || parts[dropdowns.indexOf(dropdown)];
-            const indices = part && batchAnswers.get(part.id);
+            const indices = part && (part.correct || batchAnswers.get(part.id));
             if (!indices?.length) continue;
             const wanted = plain(part.options[indices[0]]).toLowerCase();
             const button = root.querySelector('button.dropdown__btn');
@@ -316,10 +340,18 @@
         return true;
     }
 
+    // The correct options from the course data, or null: data with every _shouldBeSelected false has no answer.
+    function dataAnswer(model) {
+        const items = get(model, '_items') || [];
+        const known = items.length > 0 && items.every(item => typeof item._shouldBeSelected === 'boolean') && items.some(item => item._shouldBeSelected);
+        return known ? items.map(item => item._shouldBeSelected) : null;
+    }
+
     async function answerFromData(doc, question) {
         const id = get(question, '_id');
         const items = get(question, '_items') || [];
-        if (items.length && items.every(item => typeof item._shouldBeSelected === 'boolean')) return selectOptions(doc, id, items.map(item => item._shouldBeSelected));
+        const wanted = dataAnswer(question);
+        if (wanted) return selectOptions(doc, id, wanted);
         if (batchAnswers.has(id)) return selectOptions(doc, id, items.map((_, i) => batchAnswers.get(id).includes(i)));
         return false;
     }
@@ -332,23 +364,26 @@
         return !!inner;
     }
 
-    async function answerQuestions(articleId, log) {
+    // secure: the final exam player (see isSecurePlayer): the server may put each question in another article,
+    // and the next question can take a while to come after Submit.
+    async function answerQuestions(articleId, log, { secure = false } = {}) {
         const answered = new Set();
+        const nextWaitMs = secure ? 20000 : 4000;
+        const docNow = () => (secure ? findCourse()?.win.document : currentArticle(articleId)?.doc) || null;
         const openQuestion = doc => allElements(doc).find(el => el.model && typeof el.model.get === 'function' && get(el.model, '_isQuestionType') &&
-            visible(el) && !answered.has(get(el.model, '_id')) && !get(el.model, '_isSubmitted') && belongsTo(el.model, articleId));
+            visible(el) && !answered.has(get(el.model, '_id')) && !get(el.model, '_isSubmitted') && (secure || belongsTo(el.model, articleId)));
         const confirmShown = doc => findDeep(doc, el => el.id === 'confirm-exam' && visible(el)); // "Submit My Assessment"
         for (let step = 0; step < 300; step++) {
-            const current = currentArticle(articleId);
-            if (!current) return;
-            const { doc } = current;
+            const doc = docNow();
+            if (!doc) return;
             const view = openQuestion(doc);
             if (!view) {
                 if (confirmShown(doc)) return;
                 // Between questions: wait for the next one or for the confirmation screen.
                 const next = await waitFor(() => {
-                    const again = currentArticle(articleId);
-                    return again && (openQuestion(again.doc) || confirmShown(again.doc));
-                }, 4000);
+                    const again = docNow();
+                    return again && (openQuestion(again) || confirmShown(again));
+                }, nextWaitMs);
                 if (!next) return;
                 continue;
             }
@@ -356,12 +391,13 @@
             const id = get(question, '_id');
             answered.add(id);
             let fromData = isMatching(question) ? false : await answerFromData(doc, question);
+            const questionArticle = secure ? secureArticle(question) : articleId;
             if (isMatching(question)) {
-                await prefetchAnswers(articleId);
+                await prefetchAnswers(questionArticle);
                 fromData = await answerMatching(view);
             } else if (!fromData && isChoice(questionEntry(question))) {
                 // "1 question at a time" exams load each question when it comes: the bank (or the model) for it now.
-                await prefetchAnswers(articleId);
+                await prefetchAnswers(questionArticle);
                 fromData = await answerFromData(doc, question);
             }
             if (!fromData) {
@@ -449,7 +485,22 @@
                 (get(el.model, '_isQuestionType') || /adaptiveStartScreen/.test(get(el.model, '_component') || '')) && belongsTo(el.model, id));
             if (shown) return id;
         }
-        return null;
+        const secure = secureQuestion(doc);
+        return secure ? secureArticle(secure.model) : null;
+    }
+
+    // Final exams run in the "Common Secure Assessment" player (SECURE-BLOCK-STRIP-VIEW, SECURE-TOOLBAR-VIEW): its
+    // article has no _assessment._isEnabled, the server sends one question at a time (from the module question
+    // pools, no answers in the data) and the next one comes after Submit. Its "Skip All" button skips the questions
+    // and is never pressed. Verified on the Network Security Course Final Exam (60 questions).
+    const isSecurePlayer = doc => !!findDeep(doc, el => /^SECURE-/.test(el.tagName));
+    function secureQuestion(doc) {
+        if (!isSecurePlayer(doc)) return null;
+        return findDeep(doc, el => visible(el) && el.model && typeof el.model.get === 'function' && get(el.model, '_isQuestionType'));
+    }
+    function secureArticle(model) {
+        const article = model.getAncestorModels().find(ancestor => get(ancestor, '_type') === 'article');
+        return article ? get(article, '_id') : null;
     }
 
     // Exams with "Skip All" (checkpoint exams load one question at a time): Skip All brings every question at once
@@ -487,7 +538,8 @@
         await prefetchAnswers(articleId);
         const wantedFor = model => {
             const items = get(model, '_items') || [];
-            if (items.length && items.every(item => typeof item._shouldBeSelected === 'boolean')) { log.fromData = (log.fromData || 0) + 1; return items.map(item => item._shouldBeSelected); }
+            const data = dataAnswer(model);
+            if (data) { log.fromData = (log.fromData || 0) + 1; return data; }
             const batch = batchAnswers.get(get(model, '_id'));
             if (batch) { log.ai = (log.ai || 0) + 1; return items.map((_, i) => batch.includes(i)); }
             return null;
@@ -538,6 +590,14 @@
             const again = currentArticle(articleId);
             return again && findDeep(again.doc, el => visible(el) && el.model && typeof el.model.get === 'function' && get(el.model, '_isQuestionType') && belongsTo(el.model, articleId));
         };
+        if (isSecurePlayer(current.doc)) {
+            // One question after another: each one's answer (bank or model) when it arrives, Submit, wait for the next.
+            await prefetchAnswers(articleId);
+            await answerQuestions(articleId, log, { secure: true });
+            const doc = findCourse()?.win.document;
+            const left = doc && secureQuestion(doc) ? 1 : 0; // stopped on a question it could not answer
+            return { ready: true, ...log, secure: true, confirm: !left, left };
+        }
         if (!questionShown()) {
             clickVisible(current.doc, el => el.matches('.start-button') && belongsTo((el.getRootNode().host || {}).model || current.article, articleId));
             await waitFor(questionShown, 8000);

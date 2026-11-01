@@ -129,19 +129,60 @@
         return MULTIPLE_PROMPT.test(prompt);
     }
 
+    // Open questions checked automatically need the bare value: Numeric → "number", Regex / exact match / math → "short".
+    function answerFormat(typename) {
+        if (/numeric|number/.test(typename)) return 'number';
+        if (/regex|exactmatch|textmatch|math|shorttext|singleline/.test(typename)) return 'short';
+        return null;
+    }
+
+    // Dropdown blanks (MultipleFillableBlanks: "Match … with …", a select per row): each blank becomes a single-choice
+    // question "<stem> — Which option matches "<row text>"?". The prompt HTML marks blanks with
+    // <span class="cml-fillable-blank" data-uuid>; in a table the row's other cells name the item.
+    function fillableBlanks(schema) {
+        const blanks = schema.fillableBlanks || [];
+        if (!blanks.length) return null;
+        const doc = new DOMParser().parseFromString(schema.prompt?.htmlWithMetadata?.html || '', 'text/html');
+        const spans = [...doc.querySelectorAll('.cml-fillable-blank, [data-uuid]')];
+        const stem = htmlToText([...doc.body.querySelectorAll('p')].filter(p => !p.closest('table') && !p.querySelector('[data-uuid]')).map(p => p.outerHTML).join(' ')) || 'Match the items';
+        const labelOf = span => {
+            const row = span.closest('tr');
+            if (row) return [...row.children].filter(cell => !cell.contains(span)).map(cell => htmlToText(cell.innerHTML)).join(' ').trim();
+            const block = span.closest('p, li, div') || span.parentElement;
+            const copy = block.cloneNode(true);
+            copy.querySelectorAll('[data-uuid]').forEach(other => other.replaceWith(other.dataset.uuid === span.dataset.uuid ? ' ____ ' : ' … '));
+            return htmlToText(copy.innerHTML);
+        };
+        const order = spans.map(span => span.dataset.uuid);
+        const idOf = blank => String(blank.fillableBlankId ?? blank.id ?? '');
+        return blanks
+            .map((blank, k) => {
+                const span = spans.find(el => el.dataset.uuid === idOf(blank)) || spans[k];
+                const label = (span && labelOf(span)) || `Response ${k + 1}`;
+                const options = (blank.answerOptions || blank.options || []).map(option => htmlToText(option?.display?.htmlWithMetadata?.html));
+                return { id: idOf(blank), label, options, question: Materials.matchingQuestion(stem, label), position: order.indexOf(idOf(blank)) };
+            })
+            .sort((a, b) => (a.position < 0 ? 1e9 : a.position) - (b.position < 0 ? 1e9 : b.position));
+    }
+
     function extractQuestions(parts) {
         return parts.map(part => {
             const schema = part.questionSchema || {};
-            const typename = String(schema.__typename || '').toLowerCase();
-            const options = (schema.options || []).map(option => htmlToText(option?.display?.htmlWithMetadata?.html));
+            // The question's own type names it (Submission_NumericQuestion…); its schema may not (PromptOnlyQuestionSchema).
+            const typename = `${part.__typename || ''} ${schema.__typename || ''}`.toLowerCase();
             const question = htmlToText(schema.prompt?.htmlWithMetadata?.html);
+            if (/textblock/.test(typename)) return { type: 'skip', question, options: [], typename: part.__typename || '' };
+            const blanks = fillableBlanks(schema);
+            if (blanks) return { type: 'blanks', question, options: [], blanks, typename: part.__typename || '' };
+            const options = (schema.options || []).map(option => htmlToText(option?.display?.htmlWithMetadata?.html));
             const isChoice = options.length > 0;
             return {
                 type: isChoice ? 'mcq' : 'textArea',
                 multiple: isChoice && isMultipleChoice(schema, typename, question),
                 question,
                 options: isChoice ? options : [],
-                typename: schema.__typename || ''
+                ...(!isChoice && answerFormat(typename) ? { format: answerFormat(typename) } : {}),
+                typename: part.__typename || schema.__typename || ''
             };
         });
     }
@@ -180,7 +221,9 @@
 
     // ------------------------------------------------------------------ applying answers
 
-    const CONTROL_SELECTOR = 'input[type="radio"], input[type="checkbox"], textarea, input[type="text"], input[type="number"], input:not([type]), [contenteditable="true"]';
+    const TEXT_FIELD = 'textarea, input[type="text"], input[type="number"], input[type="tel"], input:not([type]), [contenteditable="true"]';
+    const BLANK_TRIGGER = '[role="button"][aria-haspopup="listbox"], [role="combobox"]';
+    const CONTROL_SELECTOR = `input[type="radio"], input[type="checkbox"], ${TEXT_FIELD}, ${BLANK_TRIGGER}`;
     const KNOWN_CONTAINER_SELECTORS = ['div.css-1tfphom', '[data-testid^="part-Submission"]', '[data-testid="question-part"]'];
 
     function findContainerByText(questionText) {
@@ -200,12 +243,14 @@
         return null;
     }
 
+    // Text blocks between questions have no controls and no container.
     function findQuestionContainers(questions) {
+        const asked = questions.filter(q => q.type !== 'skip');
         for (const selector of KNOWN_CONTAINER_SELECTORS) {
             const found = [...document.querySelectorAll(selector)].filter(el => el.querySelector(CONTROL_SELECTOR));
-            if (found.length === questions.length) return found;
+            if (found.length === asked.length) return questions.map(q => (q.type === 'skip' ? null : found[asked.indexOf(q)]));
         }
-        return questions.map(q => findContainerByText(q.question));
+        return questions.map(q => (q.type === 'skip' ? null : findContainerByText(q.question)));
     }
 
     function optionLabel(input) {
@@ -213,20 +258,33 @@
         return normalize((label || input.parentElement)?.textContent);
     }
 
-    // Maps option index -> input element, preferring text matching over DOM order.
+    // Maps option index -> input element by option text: exact label first, then a label that contains the option
+    // (shortest such label, so "1" does not take "10"). Options whose text is not found (math, images) take the
+    // input at their own position when no other option claimed it.
     function mapOptions(container, question) {
         const inputs = [...container.querySelectorAll('input[type="radio"], input[type="checkbox"]')];
         const labels = inputs.map(optionLabel);
+        const taken = new Set();
         const mapping = question.options.map(option => {
             const target = normalize(option);
             if (!target) return -1;
-            let index = labels.findIndex(label => label === target);
-            if (index === -1) index = labels.findIndex(label => label.includes(target));
+            let index = labels.findIndex((label, i) => !taken.has(i) && label === target);
+            if (index === -1) {
+                const containing = labels.map((label, i) => [label, i]).filter(([label, i]) => !taken.has(i) && label.includes(target))
+                    .sort((a, b) => a[0].length - b[0].length);
+                index = containing.length ? containing[0][1] : -1;
+            }
+            if (index >= 0) taken.add(index);
             return index;
         });
-        const unique = new Set(mapping);
-        const reliable = !mapping.includes(-1) && unique.size === mapping.length;
-        return question.options.map((_, i) => (reliable ? inputs[mapping[i]] : inputs[i]) || null);
+        return mapping.map((index, i) => (index >= 0 ? inputs[index] : !taken.has(i) ? inputs[i] : null) || null);
+    }
+
+    // The bare number of a "Numeric" answer: "4 MB" → "4", "4096/1024 = 4" → "4", "1,024" → "1024", "7,5" → "7.5".
+    function numericAnswer(content) {
+        const text = String(content).split('=').pop().replace(/(\d),(?=\d{3}(?!\d))/g, '$1');
+        const match = text.match(/-?\d+(?:[.,]\d+)?(?:e[-+]?\d+)?(?:\s*\/\s*\d+(?:\.\d+)?)?/i);
+        return match ? match[0].replace(',', '.').replace(/\s+/g, '') : String(content).trim();
     }
 
     function setNativeValue(el, value) {
@@ -250,11 +308,17 @@
         }
     }
 
-    // The rendered form is the most reliable signal: checkboxes mean "select all correct options".
+    // The rendered form is the most reliable signal: checkboxes mean "select all correct options", a number field
+    // wants a number, a one-line field wants a short value.
     function markMultipleFromPage(questions) {
         const containers = findQuestionContainers(questions);
         questions.forEach((question, i) => {
             const container = containers[i];
+            if (question.type !== 'mcq' && container && !question.format) {
+                const field = container.querySelector(TEXT_FIELD);
+                if (field?.matches('input[type="number"], input[inputmode="decimal"], input[inputmode="numeric"]')) question.format = 'number';
+                else if (field?.matches('input')) question.format = 'short';
+            }
             if (question.type !== 'mcq' || question.multiple || !container) return;
             if (container.querySelector('input[type="checkbox"], [role="checkbox"]') && !container.querySelector('input[type="radio"], [role="radio"]')) {
                 question.multiple = true;
@@ -263,22 +327,63 @@
         console.log('[Naki] Question types:', questions.map((q, i) => `${i + 1}: ${q.type}${q.multiple ? ' (multiple)' : ''} ${q.typename || ''}`));
     }
 
-    function applySolutions(questions, solutions) {
+    // A dropdown blank (Coursera's select: role=button + aria-haspopup=listbox, the options in a popup listbox):
+    // opened like a person would, the option with the wanted text is clicked.
+    async function chooseInSelect(blank, text) {
+        const trigger = blank.querySelector(BLANK_TRIGGER);
+        if (!trigger || trigger.getAttribute('aria-disabled') === 'true') return false;
+        const wanted = normalize(text);
+        if (normalize(trigger.textContent) === wanted) return true;
+        const openOptions = () => [...document.querySelectorAll('[role="listbox"] [role="option"]')].filter(option => option.getClientRects().length);
+        const press = () => {
+            for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup']) {
+                trigger.dispatchEvent(new (type.startsWith('pointer') ? PointerEvent : MouseEvent)(type, { bubbles: true, cancelable: true, button: 0, isPrimary: true, pointerType: 'mouse' }));
+            }
+            trigger.click();
+        };
+        press();
+        if (!await waitFor(() => openOptions().length, 1200, 100)) {
+            trigger.focus();
+            trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', code: 'ArrowDown', bubbles: true }));
+            await waitFor(() => openOptions().length, 1200, 100);
+        }
+        const options = openOptions();
+        const option = options.find(el => normalize(el.textContent) === wanted) || options.find(el => normalize(el.textContent).includes(wanted));
+        if (option) option.click();
+        await waitFor(() => !openOptions().length, 1500, 100);
+        if (openOptions().length) document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
+        await sleep(100);
+        return !!option && normalize(trigger.textContent).includes(wanted);
+    }
+
+    async function applySolutions(questions, solutions) {
         const containers = findQuestionContainers(questions);
         let applied = 0;
         const missed = [];
 
-        questions.forEach((question, i) => {
+        for (const [i, question] of questions.entries()) {
             const solution = solutions[i];
             const container = containers[i];
+            if (question.type === 'skip') continue;
             if (!solution || !container) {
                 missed.push(i + 1);
-                return;
+                continue;
+            }
+            if (question.type === 'blanks') {
+                // Blanks appear on the page in the order of the prompt, as question.blanks is sorted.
+                const elements = [...container.querySelectorAll('.rc-FillableBlank, .cml-fillable-blank')].filter(el => el.querySelector(BLANK_TRIGGER));
+                let chosen = 0;
+                for (const [k, blank] of question.blanks.entries()) {
+                    const index = solution.blankIndices?.[k];
+                    if (elements[k] && Number.isInteger(index) && await chooseInSelect(elements[k], blank.options[index]).catch(() => false)) chosen++;
+                }
+                if (chosen === question.blanks.length) applied++; else missed.push(i + 1);
+                continue;
             }
             if (question.type === 'mcq') {
                 const inputs = mapOptions(container, question);
                 const wanted = new Set(solution.correctOptionsIndex || []);
-                if (!wanted.size) { missed.push(i + 1); return; }
+                if (!wanted.size) { missed.push(i + 1); continue; }
                 inputs.forEach((input, optionIndex) => {
                     if (!input) return;
                     const shouldCheck = wanted.has(optionIndex);
@@ -290,13 +395,19 @@
                 });
                 applied++;
             } else {
-                const field = container.querySelector('textarea, input[type="text"], input[type="number"], input:not([type]), [contenteditable="true"]');
-                if (!field || !solution.content) { missed.push(i + 1); return; }
-                if (field.isContentEditable) setEditableText(field, solution.content);
-                else setNativeValue(field, solution.content);
+                const field = [...container.querySelectorAll(TEXT_FIELD)].find(el => !el.disabled && !el.readOnly && el.getClientRects().length);
+                const content = question.format === 'number' || field?.type === 'number' ? numericAnswer(solution.content) : String(solution.content || '').trim();
+                if (!field || !content) { missed.push(i + 1); continue; }
+                if (field.isContentEditable) setEditableText(field, content);
+                else {
+                    setNativeValue(field, content);
+                    // A field that kept its old value (React did not take the native setter): type it in.
+                    if (field.value !== content) setEditableText(field, content);
+                }
+                if (!field.isContentEditable && !field.value) { missed.push(i + 1); continue; }
                 applied++;
             }
-        });
+        }
         return { applied, missed };
     }
 
@@ -374,7 +485,8 @@
         const docs = Materials.mergeManual(downloaded, stored?.docs);
         if (docs.length) {
             const name = stored?.name && stored.name !== slug ? stored.name : await fetchCourseName(slug);
-            await Materials.save(slug, { savedAt: Date.now(), name, site: 'coursera', docs, ...(stored?.edited ? { edited: true } : {}) });
+            const latest = await Materials.read(slug); // the question bank may have grown during the download
+            await Materials.save(slug, { savedAt: Date.now(), name, site: 'coursera', docs, ...(latest?.qa ? { qa: latest.qa } : {}), ...(stored?.edited ? { edited: true } : {}) });
         }
         materialsCache.set(slug, docs);
         console.log(`[Naki] Course materials: ${downloaded.length} of ${sources.length} lectures/readings, ${docs.reduce((sum, doc) => sum + doc.text.length, 0)} chars`);
@@ -427,7 +539,108 @@
         }
     }
 
+
+    // ------------------------------------------------------------------ question bank (graded feedback)
+    // After a quiz is graded, Coursera's feedback (the "View feedback" page, GraphQL AssignmentFeedback) tells for
+    // every question whether the answer was correct, and for checkbox options, exact-match and dropdown blanks even
+    // which options are right. NSolver reads the feedback of every quiz of the course into the course's question bank
+    // (materials base, record.qa); a quiz is answered from the bank first, then the model gets the rest with the
+    // course materials (and the options already graded wrong). Verified on real feedback of MultipleChoice,
+    // Checkbox, Numeric, TextExactMatch and MultipleFillableBlanks questions.
+
+    const CML = '... on CmlContent { htmlWithMetadata { html } }';
+    const GRADED = 'feedback { ... on Submission_AutoGradedFeedback { correctness } }';
+    const PROMPT = `prompt { ${CML} }`;
+    const FEEDBACK_QUERY = `query NakiFeedback($courseId: ID!, $itemId: ID!) { SubmissionState { queryState(courseId: $courseId, itemId: $itemId) {
+        ... on Submission_SubmissionState { feedback { parts { __typename
+            ... on Submission_GradedMultipleChoiceQuestion { ${GRADED} questionSchema { ${PROMPT} options { optionId: id display { ${CML} } } } multipleChoiceResponse: response { chosen } }
+            ... on Submission_GradedCheckboxQuestion { ${GRADED} questionSchema { ${PROMPT} options { optionId: id correctlyAnswered display { ${CML} } } } checkboxResponse: response { chosen } }
+            ... on Submission_GradedNumericQuestion { ${GRADED} questionSchema { ${PROMPT} } numericResponse: response { answer } }
+            ... on Submission_GradedRegexQuestion { ${GRADED} questionSchema { ${PROMPT} } regexResponse: response { answer } }
+            ... on Submission_GradedTextExactMatchQuestion { ${GRADED} questionSchema { ${PROMPT} correctAnswers { answer } } textExactMatchResponse: response { answer } }
+            ... on Submission_GradedMathQuestion { ${GRADED} questionSchema { ${PROMPT} } mathResponse: response { answer } }
+            ... on Submission_GradedMultipleFillableBlanksQuestion { ${GRADED} questionSchema { ${PROMPT} fillableBlanks { ... on Submission_GradedMultipleChoiceFillableBlank {
+                fillableBlankId: id isCorrect answerOptions { optionId: id display { ${CML} } } } } }
+                multipleFillableBlanksResponse: response { responses { ... on Submission_MultipleChoiceFillableBlankResponse { responseId: id optionId } } } }
+        } } } } } }`;
+    const BANK_REFRESH_MS = 10 * 60 * 1000;
+    const bankHarvested = new Map(); // slug → time of the last read of the feedback
+
+    // Bank entries of one graded quiz.
+    function feedbackEntries(parts) {
+        const entries = [];
+        const text = content => htmlToText(content?.htmlWithMetadata?.html);
+        for (const part of parts || []) {
+            const schema = part.questionSchema || {};
+            const q = text(schema.prompt);
+            const correct = part.feedback?.correctness === 'CORRECT';
+            if (!q) continue;
+            if (part.multipleChoiceResponse) {
+                const options = (schema.options || []).map(option => text(option.display));
+                const chosen = (schema.options || []).find(option => option.optionId === part.multipleChoiceResponse.chosen);
+                if (chosen) entries.push({ q, options, [correct ? 'correct' : 'wrong']: [text(chosen.display)] });
+            } else if (part.checkboxResponse) {
+                // correctlyAnswered: the learner's choice for that option was right, so the right set follows.
+                const chosen = new Set(part.checkboxResponse.chosen || []);
+                const options = schema.options || [];
+                if (!chosen.size || options.some(option => typeof option.correctlyAnswered !== 'boolean')) continue;
+                const right = options.filter(option => chosen.has(option.optionId) === option.correctlyAnswered).map(option => text(option.display));
+                if (right.length) entries.push({ q, options: options.map(option => text(option.display)), correct: right });
+            } else if (part.multipleFillableBlanksResponse) {
+                const responses = part.multipleFillableBlanksResponse.responses || [];
+                const raw = schema.fillableBlanks || [];
+                for (const blank of fillableBlanks(schema) || []) {
+                    const source = raw.find(item => String(item.fillableBlankId) === blank.id);
+                    const response = responses.find(item => String(item.responseId) === blank.id);
+                    const option = source && response && (source.answerOptions || []).find(item => item.optionId === response.optionId);
+                    if (option) entries.push({ q: blank.question, options: blank.options, [source.isCorrect ? 'correct' : 'wrong']: [text(option.display)] });
+                }
+            } else {
+                const exact = schema.correctAnswers?.[0]?.answer;
+                const given = (part.numericResponse || part.regexResponse || part.textExactMatchResponse || part.mathResponse)?.answer;
+                const answer = exact || (correct ? given : '');
+                if (answer && String(answer).trim()) entries.push({ q, answer: String(answer).trim() });
+            }
+        }
+        return entries;
+    }
+
+    async function feedbackOf(courseId, itemId) {
+        const response = await jsonPost('https://www.coursera.org/graphql-gateway?opname=NakiFeedback',
+            [{ operationName: 'NakiFeedback', variables: { courseId, itemId }, query: FEEDBACK_QUERY }]);
+        const reply = response.ok ? await response.json() : null;
+        return reply?.[0]?.data?.SubmissionState?.queryState?.feedback?.parts || [];
+    }
+
+    // The course's question bank, refreshed from the feedback of its quizzes (at most every 10 minutes).
+    async function courseBank(slug) {
+        const stored = await Materials.read(slug);
+        if (Date.now() - (bankHarvested.get(slug) || 0) < BANK_REFRESH_MS) return stored?.qa || [];
+        bankHarvested.set(slug, Date.now());
+        try {
+            const materials = await courseMaterialsFor(slug);
+            const courseId = materials?.linked?.['onDemandGradingParameters.v1']?.[0]?.id || await fetchCourseId(slug);
+            const quizzes = materialItems(materials).filter(item => /exam|quiz|staffGraded/i.test(item.contentSummary?.typeName || ''));
+            const fresh = [];
+            await runLimited(quizzes, 4, async item => { fresh.push(...feedbackEntries(await feedbackOf(courseId, item.id).catch(() => []))); });
+            const latest = await Materials.read(slug);
+            const qa = Materials.mergeBank(latest?.qa || [], fresh);
+            if (qa.length) await Materials.save(slug, { ...(latest || { savedAt: 0, name: slug, site: 'coursera', docs: [] }), qa });
+            console.log(`[Naki] Question bank: ${fresh.length} graded answers from ${quizzes.length} quizzes, ${qa.length} in the bank`);
+            return qa;
+        } catch (error) {
+            console.warn('[Naki] Question bank unavailable:', error.message);
+            return stored?.qa || [];
+        }
+    }
+
     // ------------------------------------------------------------------ quiz solver
+
+    // Options graded wrong in an earlier attempt are named in the question, so the model picks another one.
+    function withWrong(bank, item) {
+        const wrong = Materials.bankWrong(bank, item.question, item.options);
+        return wrong.length ? { ...item, question: `${item.question}\n(Already graded incorrect in an earlier attempt: ${wrong.map(option => `"${option}"`).join(', ')}.)` } : item;
+    }
 
     // Returns the number of answered questions (0 when nothing was solved).
     async function solveQuiz({ auto = false } = {}) {
@@ -451,24 +664,57 @@
             }
 
             const questions = state.questions;
+            const asked = questions.filter(q => q.type !== 'skip').length;
             const settings = state.settings;
             const options = { provider: settings.provider, apiKey: Naki.activeKey(settings), modelId: Naki.activeModel(settings), lang: settings.lang };
-            const solvingToast = toast(tr('toastSolving', { auto: auto ? tr('toastAuto') : '', n: questions.length, model: options.modelId }), 'info', 0);
-            options.contextFor = await courseContext(solvingToast);
-            solvingToast.update(tr('toastSolving', { auto: auto ? tr('toastAuto') : '', n: questions.length, model: options.modelId }) +
-                (options.contextFor ? tr('toastWithMaterials') : ''), 'info', 6000);
+            const solvingToast = toast(tr('toastSolving', { auto: auto ? tr('toastAuto') : '', n: asked, model: options.modelId }), 'info', 0);
             const started = performance.now();
-
-            await waitFor(() => document.querySelector('input[type="radio"], input[type="checkbox"], [role="checkbox"], textarea'), 10000);
+            await waitFor(() => document.querySelector(`input[type="radio"], input[type="checkbox"], [role="checkbox"], textarea, ${BLANK_TRIGGER}`), 10000);
             markMultipleFromPage(questions);
-            const solutions = await ModelProvider.solveQuizQuestions(questions.map(({ typename, ...q }) => q), options);
-            if (!solutions.length) throw new Error(tr('errEmptySolutions'));
-            console.log('[Naki] Solutions:', solutions);
 
-            const { applied, missed } = applySolutions(questions, solutions);
+            // 1. The course's question bank (graded feedback of its quizzes); 2. the model, with the course materials,
+            // for the rest. A dropdown question goes to the model as one single-choice question per blank.
+            const bank = courseSlug() ? await courseBank(courseSlug()) : [];
+            const solutions = questions.map(() => null);
+            const toModel = []; // { i, k (blank), item }
+            for (const [i, question] of questions.entries()) {
+                if (question.type === 'skip') continue;
+                if (question.type === 'blanks') {
+                    solutions[i] = { blankIndices: question.blanks.map(blank => Materials.bankAnswer(bank, blank.question, blank.options)?.[0] ?? null) };
+                    question.blanks.forEach((blank, k) => {
+                        if (solutions[i].blankIndices[k] === null) toModel.push({ i, k, item: withWrong(bank, { type: 'mcq', multiple: false, question: blank.question, options: blank.options }) });
+                    });
+                } else if (question.type === 'mcq') {
+                    const known = Materials.bankAnswer(bank, question.question, question.options);
+                    if (known) solutions[i] = { correctOptionsIndex: known };
+                    else toModel.push({ i, item: withWrong(bank, { type: 'mcq', multiple: question.multiple, question: question.question, options: question.options }) });
+                } else {
+                    const known = Materials.bankText(bank, question.question);
+                    if (known) solutions[i] = { content: known };
+                    else toModel.push({ i, item: { type: 'textArea', question: question.question, options: [], ...(question.format ? { format: question.format } : {}) } });
+                }
+            }
+            const fromBank = asked - new Set(toModel.map(entry => entry.i)).size;
+            if (bank.length) solvingToast.update(tr('toastBank', { bank: fromBank, ai: toModel.length }), 'info', 0);
+            if (toModel.length) {
+                options.contextFor = await courseContext(solvingToast);
+                solvingToast.update(tr('toastSolving', { auto: auto ? tr('toastAuto') : '', n: toModel.length, model: options.modelId }) +
+                    (options.contextFor ? tr('toastWithMaterials') : ''), 'info', 6000);
+                const answers = await ModelProvider.solveQuizQuestions(toModel.map(entry => entry.item), options);
+                if (!answers.length) throw new Error(tr('errEmptySolutions'));
+                toModel.forEach((entry, n) => {
+                    const answer = answers[n];
+                    if (!answer) return;
+                    if (entry.k === undefined) solutions[entry.i] = answer;
+                    else solutions[entry.i].blankIndices[entry.k] = answer.correctOptionsIndex?.[0] ?? null;
+                });
+            }
+            console.log('[Naki] Solutions:', { fromBank, fromModel: toModel.length, solutions });
+
+            const { applied, missed } = await applySolutions(questions, solutions);
             const seconds = ((performance.now() - started) / 1000).toFixed(1);
             if (missed.length) {
-                toast(tr('toastPartial', { applied, total: questions.length, sec: seconds, missed: missed.join(', ') }), applied ? 'success' : 'error', 8000);
+                toast(tr('toastPartial', { applied, total: asked, sec: seconds, missed: missed.join(', ') }), applied ? 'success' : 'error', 8000);
             } else {
                 toast(tr('toastDone', { applied, sec: seconds }), 'success', 6000);
             }

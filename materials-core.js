@@ -119,5 +119,78 @@ Naki.materials = (function () {
         return picked.map(chunk => `[${LABELS[chunk.doc.type] || 'Material'}: ${chunk.doc.title}] ${chunk.text}`).join('\n\n');
     }
 
-    return { KEY, INDEX_KEY, courseId, read, isFresh, remember, mergeManual, save, wordsOf, chunkDocs, excerpts };
+    // ---------------------------------------------------------------- question bank
+    // Questions whose answer is known, per course (record.qa), checked before the model is asked:
+    //   { q, options, correct: [option texts] }  a choice question (NetAcad course data, Coursera graded feedback)
+    //   { q, options, wrong: [option texts] }    options graded wrong on Coursera (a hint for the model)
+    //   { q, answer }                            an open question with its accepted answer (Coursera)
+    // Options are matched by text, so their order on the page does not matter. Matching items and dropdown blanks
+    // are single-choice entries worded "<stem> — Which option matches "<item>"?".
+
+    const bankNorm = text => String(text || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+    const bankKey = entry => `${bankNorm(entry.q)}|${(entry.options || []).map(bankNorm).sort().join('|')}`;
+    const matchingQuestion = (stem, label) => `${stem} — Which option matches "${label}"?`;
+
+    // Fresh entries win; a known answer is never replaced by a mere list of wrong options, whose lists add up.
+    function mergeBank(previous, fresh) {
+        const byKey = new Map(previous.map(entry => [bankKey(entry), entry]));
+        for (const entry of fresh) {
+            const key = bankKey(entry);
+            const old = byKey.get(key);
+            if (entry.wrong && old && (old.correct || old.answer)) continue;
+            if (entry.wrong && old?.wrong) byKey.set(key, { ...entry, wrong: [...new Set([...old.wrong, ...entry.wrong])] });
+            else byKey.set(key, entry);
+        }
+        return [...byKey.values()];
+    }
+
+    function similarity(a, b) {
+        const left = new Set(bankNorm(a).split(' ').filter(word => word.length > 1));
+        const right = new Set(bankNorm(b).split(' ').filter(word => word.length > 1));
+        if (!left.size || !right.size) return 0;
+        let same = 0;
+        for (const word of left) if (right.has(word)) same++;
+        return same / (left.size + right.size - same);
+    }
+    // Matching items share their question's long stem: the item itself must be the same, not only similar.
+    const matchingItem = text => (String(text).match(/Which option matches "(.*)"\?$/) || [])[1];
+    const sameQuestion = (a, b) => {
+        const x = bankNorm(a), y = bankNorm(b);
+        const similar = x === y || (Math.min(x.length, y.length) > 25 && (x.includes(y) || y.includes(x))) || similarity(a, b) >= 0.85;
+        return similar && bankNorm(matchingItem(a) ?? '\u0000') === bankNorm(matchingItem(b) ?? '\u0000');
+    };
+    // Option indices of the given texts, or null when one of them is not among the options.
+    function indicesOf(texts, options) {
+        const indices = texts.map(text => {
+            const exact = options.findIndex(option => bankNorm(option) === bankNorm(text));
+            if (exact >= 0) return exact;
+            const scored = options.map((option, i) => [similarity(option, text), i]).sort((a, b) => b[0] - a[0])[0];
+            return scored && scored[0] >= 0.8 ? scored[1] : -1;
+        });
+        return indices.length && indices.every(i => i >= 0) && new Set(indices).size === indices.length ? indices.sort((a, b) => a - b) : null;
+    }
+    // Indices of the correct options of a question from the bank, or null when the bank does not know it.
+    function bankAnswer(bank, question, options) {
+        for (const entry of bank) {
+            if (!entry.correct || !sameQuestion(entry.q, question)) continue;
+            const indices = indicesOf(entry.correct, options);
+            if (indices) return indices;
+        }
+        return null;
+    }
+    // The accepted answer of an open question, or null.
+    function bankText(bank, question) {
+        const entry = bank.find(item => item.answer && sameQuestion(item.q, question));
+        return entry ? entry.answer : null;
+    }
+    // Options of a choice question already graded wrong (texts), [] when none is known.
+    function bankWrong(bank, question, options) {
+        const wrong = bank.filter(entry => entry.wrong && sameQuestion(entry.q, question)).flatMap(entry => entry.wrong);
+        return options.filter(option => wrong.some(text => bankNorm(text) === bankNorm(option)));
+    }
+
+    return {
+        KEY, INDEX_KEY, courseId, read, isFresh, remember, mergeManual, save, wordsOf, chunkDocs, excerpts,
+        matchingQuestion, mergeBank, bankAnswer, bankText, bankWrong
+    };
 })();

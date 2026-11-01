@@ -44,6 +44,8 @@ var ModelProvider = (function () {
             if (q.type === 'mcq') {
                 item.multipleAnswers = !!q.multiple;
                 item.options = q.options.map((text, i) => ({ i, text }));
+            } else if (q.format) {
+                item.answerFormat = q.format;
             }
             return item;
         });
@@ -56,6 +58,10 @@ Rules:
    - If "multipleAnswers" is false, return EXACTLY ONE index. If it is true, return ALL correct indices.
 2. For "textArea" questions:
    - "content": a concise, accurate answer string (a number, word, formula or short paragraph as the question requires).
+   - "answerFormat": "number" → "content" is the bare number only, in the unit the question asks for: no units,
+     words or working (e.g. "4", "7.5", "-0.25"). Work the calculation out carefully before answering.
+   - "answerFormat": "short" → "content" is only the exact word, phrase or value that is checked automatically,
+     with no sentence around it.
 3. Every answer object must contain "index" equal to the question's "index".
 4. Output ONLY a valid JSON array with exactly ${questions.length} objects, ordered by "index".
    No markdown, no code fences, no explanations.
@@ -419,7 +425,9 @@ Return the corrected JSON array only.`;
                 return null;
             }
             if (question.type !== 'mcq') {
-                const content = typeof item.content === 'string' ? item.content : (item.answer ?? '');
+                // Numeric answers often come back as JSON numbers ("content": 4), not strings.
+                const raw = item.content ?? item.answer ?? '';
+                const content = Array.isArray(raw) ? raw.join(', ') : typeof raw === 'object' ? '' : raw;
                 if (!String(content).trim()) problems.push(`empty "content" for index ${index}`);
                 return { index, content: String(content) };
             }

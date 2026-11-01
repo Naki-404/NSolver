@@ -775,39 +775,8 @@
     // others). Module quizzes and checkpoint exams reuse many of these questions, and their own data has no answers:
     // such questions are answered from the bank, without the model.
 
-    const bankNorm = text => String(text || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
-    const bankKey = entry => `${bankNorm(entry.q)}|${entry.options.map(bankNorm).sort().join('|')}`;
-    function mergeBank(previous, fresh) {
-        const byKey = new Map(previous.map(entry => [bankKey(entry), entry]));
-        for (const entry of fresh) byKey.set(bankKey(entry), entry);
-        return [...byKey.values()];
-    }
-    function similarity(a, b) {
-        const left = new Set(bankNorm(a).split(' ').filter(word => word.length > 1));
-        const right = new Set(bankNorm(b).split(' ').filter(word => word.length > 1));
-        if (!left.size || !right.size) return 0;
-        let same = 0;
-        for (const word of left) if (right.has(word)) same++;
-        return same / (left.size + right.size - same);
-    }
-    const sameText = (a, b) => {
-        const x = bankNorm(a), y = bankNorm(b);
-        return x === y || (Math.min(x.length, y.length) > 25 && (x.includes(y) || y.includes(x))) || similarity(a, b) >= 0.85;
-    };
-    // Indices of the correct options of a question from the bank, or null when the bank does not know it.
-    function bankAnswer(bank, question, options) {
-        for (const entry of bank) {
-            if (!sameText(entry.q, question)) continue;
-            const indices = entry.correct.map(text => {
-                const exact = options.findIndex(option => bankNorm(option) === bankNorm(text));
-                if (exact >= 0) return exact;
-                const scored = options.map((option, i) => [similarity(option, text), i]).sort((a, b) => b[0] - a[0])[0];
-                return scored && scored[0] >= 0.8 ? scored[1] : -1;
-            });
-            if (indices.length && indices.every(i => i >= 0) && new Set(indices).size === indices.length) return indices.sort((a, b) => a - b);
-        }
-        return null;
-    }
+    // The bank itself (matching by text, merging) lives in materials-core.js, shared with Coursera.
+    const { mergeBank, bankAnswer } = Materials;
 
     // A whole quiz at once (netacad-main.js, before the first question): the bank first, then one request to the model.
     async function answerBatch(questions) {
