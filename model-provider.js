@@ -1,4 +1,4 @@
-// AI providers for the quiz solver: OctavAPI, Claude API, ChatGPT (OpenAI) API, Gemini API. NSolver, made by Naki — https://github.com/Naki-404/NSolver
+// AI providers for the quiz solver: OctavAPI, SyncAPI, Claude API, ChatGPT (OpenAI) API, Gemini API. NSolver, made by Naki — https://github.com/Naki-404/NSolver
 // Requests go through background.js because content scripts on coursera.org and netacad.com are subject to CORS.
 var ModelProvider = (function () {
     const CHUNK_SIZE = 10;          // questions per request
@@ -14,6 +14,12 @@ var ModelProvider = (function () {
             name: 'OctavAPI',
             keyUrl: 'https://octavapi.shop',
             models: ['gpt-6-luna', 'gpt-6.1-sol', 'gpt-6-sol', 'gpt-6-astra', 'gpt-5.5', 'claude-sonnet-5', 'claude-opus-5', 'claude-opus-5-5']
+        },
+        syncapi: {
+            name: 'SyncAPI',
+            keyUrl: 'https://syncapi.store',
+            models: ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-fable-5-1', 'claude-opus-5', 'claude-sonnet-5', 'gpt-6-astra', 'gpt-6-luna',
+                'gpt-5-6-sol', 'gpt-5-5', 'gemini-3.1-pro-preview', 'gemini-3.8-flash', 'grok-4.7', 'kimi-k3', 'glm-5.3']
         },
         anthropic: {
             name: 'Claude API',
@@ -285,6 +291,27 @@ Return the corrected JSON array only.`;
         }
     }
 
+    // SyncAPI: an OpenAI-compatible gateway (Claude, GPT, Gemini, Grok, Kimi, GLM) at syncapi.store/v1.
+    // A JSON answer or, from some routes, an event stream.
+    async function syncapiRequest(ctx, prompt) {
+        const { json, text, status } = await call(ctx, {
+            url: 'https://syncapi.store/v1/chat/completions',
+            headers: { Authorization: 'Bearer ' + ctx.apiKey },
+            body: { model: ctx.model, messages: [{ role: 'user', content: prompt }] }
+        });
+        if (json) {
+            const error = jsonErrorOrNull(ctx, json, status);
+            if (error) throw error;
+            if (json.choices?.[0]?.message?.refusal) throw apiError(Naki.t(ctx.lang, 'errRefusal'));
+            return textOrThrow(ctx, extractTextFromResponse(json));
+        }
+        const parsed = parseEventStream(text);
+        if (parsed.error && !parsed.text) {
+            throw apiError(Naki.t(ctx.lang, 'errApi', { provider: 'SyncAPI', status, error: errorMessageFrom(parsed.error, 'Unknown error') }), { status, code: parsed.error.code });
+        }
+        return textOrThrow(ctx, parsed.text);
+    }
+
     async function anthropicRequest(ctx, prompt) {
         const headers = {
             'x-api-key': ctx.apiKey,
@@ -329,7 +356,7 @@ Return the corrected JSON array only.`;
         return textOrThrow(ctx, extractTextFromResponse(json));
     }
 
-    const REQUESTERS = { octava: octavaRequest, anthropic: anthropicRequest, openai: openaiRequest, gemini: geminiRequest };
+    const REQUESTERS = { octava: octavaRequest, syncapi: syncapiRequest, anthropic: anthropicRequest, openai: openaiRequest, gemini: geminiRequest };
 
     function makeContext({ provider = 'octava', apiKey, modelId, lang = 'ru' }) {
         const id = PROVIDERS[provider] ? provider : 'octava';
@@ -356,6 +383,10 @@ Return the corrected JSON array only.`;
         if (ctx.provider === 'octava') {
             const { json } = await call(ctx, { url: 'https://octavapi.shop/v1/models', method: 'GET', headers: { Authorization: 'Bearer ' + ctx.apiKey } });
             return (json?.data || []).map(m => m.id).filter(id => id && !/(embedding|image_gen|tts|whisper)/i.test(id));
+        }
+        if (ctx.provider === 'syncapi') {
+            const { json } = await call(ctx, { url: 'https://syncapi.store/v1/models', method: 'GET', headers: { Authorization: 'Bearer ' + ctx.apiKey } });
+            return (json?.data || []).map(m => m.id).filter(id => id && !/(embedding|image|tts|whisper|moderation)/i.test(id));
         }
         if (ctx.provider === 'openai') {
             const { json } = await call(ctx, { url: 'https://api.openai.com/v1/models', method: 'GET', headers: { Authorization: 'Bearer ' + ctx.apiKey } });

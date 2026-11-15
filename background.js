@@ -6,6 +6,7 @@ const API_TIMEOUT_MS = 300000; // long answers (peer-reviewed assignments) can t
 const NETACAD_MATCHES = chrome.runtime.getManifest().content_scripts.find(entry => entry.js.includes('netacad.js')).matches;
 const ALLOWED_API_PREFIXES = [
     'https://octavapi.shop/v1/',
+    'https://syncapi.store/v1/',
     'https://api.anthropic.com/v1/',
     'https://api.openai.com/v1/',
     'https://generativelanguage.googleapis.com/v1beta/'

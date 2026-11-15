@@ -11,13 +11,13 @@ var Naki = (function () {
         LAB_DONE: 'naki:lab-done'
     };
 
-    const PROVIDER_IDS = ['octava', 'anthropic', 'openai', 'gemini'];
+    const PROVIDER_IDS = ['octava', 'syncapi', 'anthropic', 'openai', 'gemini'];
 
     const DEFAULT_SETTINGS = {
         lang: 'ru',
         provider: 'octava',
-        apiKeys: { octava: '', anthropic: '', openai: '', gemini: '' },
-        models: { octava: 'gpt-6-luna', anthropic: 'claude-opus-5-5', openai: 'gpt-5.5', gemini: 'gemini-3.8-flash' },
+        apiKeys: { octava: '', syncapi: '', anthropic: '', openai: '', gemini: '' },
+        models: { octava: 'gpt-6-luna', syncapi: 'claude-opus-5-5', anthropic: 'claude-opus-5-5', openai: 'gpt-5.5', gemini: 'gemini-3.8-flash' },
         autoSolve: false,
         courseContext: true, // course texts from the materials base go into the prompt (Coursera and NetAcad)
         materialsTtlDays: 14, // a downloaded Coursera course is downloaded again after this many days

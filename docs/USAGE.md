@@ -44,7 +44,7 @@ NSolver: Coursera & NetAcad Solver / AutoPass, made by [Naki](https://github.com
 
 Откройте NSolver → вкладка **Настройки**.
 
-1. **API.** Выберите провайдера: OctavAPI, Claude API, ChatGPT API или Gemini API.
+1. **API.** Выберите провайдера: OctavAPI, SyncAPI, Claude API, ChatGPT API или Gemini API.
 2. **API-ключ.** Вставьте ключ. «Получить ключ ↗» открывает страницу ключей выбранного провайдера.
 3. Нажмите **Сохранить** (или Enter). Расширение:
    - сохранит ключ;
@@ -61,6 +61,7 @@ NSolver: Coursera & NetAcad Solver / AutoPass, made by [Naki](https://github.com
 | API | Страница ключей |
 |---|---|
 | OctavAPI | https://octavapi.shop |
+| SyncAPI | https://syncapi.store |
 | Claude API | https://console.anthropic.com/settings/keys |
 | ChatGPT API | https://platform.openai.com/api-keys |
 | Gemini API | https://aistudio.google.com/app/apikey |
@@ -235,8 +236,8 @@ NSolver сначала читает прогресс курса и трогае�
 
 ```
 Coursera page ──► interceptor.js ──► content.js ──► background.js ──► выбранный AI API
- (ответы API)     (MAIN world)      (вопросы,       (прокси, обход     (OctavAPI / Claude /
-                                     ответы,         CORS)              ChatGPT / Gemini)
+ (ответы API)     (MAIN world)      (вопросы,       (прокси, обход     (OctavAPI / SyncAPI /
+                                     ответы,         CORS)              Claude / ChatGPT / Gemini)
                                      хоткеи)
 ```
 
