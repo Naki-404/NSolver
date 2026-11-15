@@ -270,14 +270,25 @@
             return (get(model, '_items') || []).map((item, k) => {
                 const label = plain(item.text || item.title);
                 const options = (item._options || []).map(option => plain(option.text));
-                const correct = (item._options || []).flatMap((option, i) => (option._isCorrect === true ? [i] : []));
+                let correct = (item._options || []).flatMap((option, i) => (option._isCorrect === true ? [i] : []));
+                // A survey after a lab ("I feel confident…"): every option counts, "Agree" is taken.
+                if (correct.length > 1 && correct.length === options.length) {
+                    const agree = options.findIndex(option => /^agree$/i.test(option));
+                    correct = [agree >= 0 ? agree : correct[0]];
+                }
                 return { id: `${get(model, '_id')}::${k}`, category: label, question: matchingQuestion(stem, label), options, multiple: false, correct: correct.length ? correct : null };
             });
         }
-        const options = (get(model, 'optionItems') || []).map(item => plain(item.option));
-        return (get(model, 'categoryItems') || []).map((item, k) => ({
-            id: `${get(model, '_id')}::${k}`, category: plain(item.category), question: matchingQuestion(stem, plain(item.category)), options, multiple: false, correct: null
-        }));
+        // Module data names each category's option in "answer" (the option with the category's id has that text).
+        const optionItems = get(model, 'optionItems') || [];
+        const options = optionItems.map(item => plain(item.option));
+        return (get(model, 'categoryItems') || []).map((item, k) => {
+            const byText = item.answer ? options.findIndex(option => option === plain(item.answer)) : -1;
+            return {
+                id: `${get(model, '_id')}::${k}`, category: plain(item.category), question: matchingQuestion(stem, plain(item.category)), options, multiple: false,
+                correct: byText >= 0 ? [byText] : null
+            };
+        });
     }
 
     async function prefetchAnswers(articleId) {
@@ -300,8 +311,16 @@
         const model = view.model;
         const parts = matchingParts(model);
         const inside = allElements(view.shadowRoot || view);
-        let dropdowns = inside.filter(el => el.tagName === 'OBJECT-MATCHING-DROPDOWN-VIEW');
+        let dropdowns = inside.filter(el => el.tagName === 'OBJECT-MATCHING-DROPDOWN-VIEW' || el.tagName === 'MATCHING-DROPDOWN-VIEW');
         if (!dropdowns.length) dropdowns = inside.filter(el => el.matches('.matching__item') && el.querySelector('button.dropdown__btn'));
+        // "Strongly Disagree, 1 of 6, not selected": the inner element's value attribute holds the option alone.
+        const optionText = li => {
+            const inner = li.querySelector('.dropdown__item-inner');
+            if (inner?.getAttribute('value')) return plain(inner.getAttribute('value')).toLowerCase();
+            const copy = (inner || li).cloneNode(true);
+            copy.querySelectorAll('.sr-only, .aria-label').forEach(el => el.remove());
+            return plain(copy.textContent).toLowerCase();
+        };
         let done = 0;
         for (const dropdown of dropdowns) {
             const root = dropdown.shadowRoot || dropdown;
@@ -314,7 +333,7 @@
             if (!button) continue;
             button.click();
             await sleep(300);
-            const option = [...root.querySelectorAll('[role="option"]')].find(li => plain(li.textContent).toLowerCase() === wanted);
+            const option = [...root.querySelectorAll('[role="option"]')].find(li => optionText(li) === wanted);
             if (option) {
                 (option.querySelector('.dropdown__item-inner') || option).click();
                 done++;
@@ -658,6 +677,71 @@
         return { ready: true, ...log, confirm: ready, left: questionModels(articleId).length - (log.answered || 0) };
     }
 
+    // ---------------------------------------------------------------- questions outside quizzes
+    // Practice questions, checks between topics and the short survey after each lab are question components on the
+    // module pages, outside any assessment. They count toward module progress, so the materials skip leaves them
+    // and they are answered here: the module data holds their answers (mcq: _shouldBeSelected, matching: _isCorrect,
+    // objectMatching: each category's "answer"), the bank or the model answers the rest. Every page of the module is
+    // rendered at once; each question has its own Submit (js-btn-action). Verified on the Ethical Hacker course.
+
+    function looseQuestions(course) {
+        return course.getAllDescendantModels(true).filter(model => get(model, '_isQuestionType') && !get(model, '_isComplete') &&
+            !get(model, '_isOptional') && get(model, '_isAvailable') !== false && !inAssessment(model));
+    }
+
+    async function answerLooseQuestions() {
+        const found = findCourse();
+        if (!found) return { ready: false };
+        const doc = found.win.document;
+        const models = looseQuestions(found.course);
+        const log = { total: models.length, answered: 0, missed: 0 };
+        // Choice questions without answers in the data: the bank / the model, all in one request.
+        const unknown = models.filter(model => !isMatching(model) && !dataAnswer(model)).map(questionEntry)
+            .filter(entry => isChoice(entry) && !batchAnswers.has(entry.id))
+            .map(({ id, question, options, multiple }) => ({ id, question, options, multiple }));
+        for (const model of models.filter(isMatching)) {
+            for (const part of matchingParts(model)) if (!part.correct && !batchAnswers.has(part.id) && part.options.length) unknown.push({ id: part.id, question: part.question, options: part.options, multiple: false });
+        }
+        if (unknown.length) {
+            const answers = await askAiBatch(unknown);
+            for (const [id, indices] of Object.entries(answers || {})) if (Array.isArray(indices) && indices.length) batchAnswers.set(id, indices);
+        }
+        // Only the open page of the module is rendered: the router opens the page of each question (…/id/<page>).
+        const viewOf = id => findDeep(doc, el => el.model && typeof el.model.get === 'function' && get(el.model, '_id') === id && /-VIEW$/.test(el.tagName) && el.tagName !== 'HEADING-VIEW' && visible(el));
+        const pageOf = model => model.getAncestorModels().find(ancestor => get(ancestor, '_type') === 'page');
+        for (const model of models) {
+            const id = get(model, '_id');
+            const page = pageOf(model);
+            if (!viewOf(id) && page) {
+                const hash = found.win.location.hash;
+                found.win.location.hash = /\/id\//.test(hash) ? hash.replace(/\/id\/[^/?]+/, '/id/' + get(page, '_id')) : '#/id/' + get(page, '_id');
+                await waitFor(() => viewOf(id), 12000);
+                await sleep(500);
+            }
+            const view = viewOf(id);
+            if (!view) { log.missed++; continue; }
+            view.scrollIntoView({ block: 'center' });
+            await sleep(300);
+            let ok;
+            if (isMatching(model)) {
+                ok = await answerMatching(view);
+            } else {
+                const items = get(model, '_items') || [];
+                const wanted = dataAnswer(model) || (batchAnswers.has(id) ? items.map((_, i) => batchAnswers.get(id).includes(i)) : null);
+                ok = !!wanted && await selectOptions(doc, id, wanted);
+            }
+            const inside = () => allElements(view.shadowRoot || view);
+            const submit = ok && await waitFor(() => inside().find(el => el.matches('button.js-btn-action') && !el.disabled && visible(el)), 3000, 150);
+            if (submit) {
+                submit.click();
+                await waitFor(() => get(model, '_isSubmitted') || get(model, '_isComplete'), 3000, 150);
+            }
+            if (get(model, '_isSubmitted') || get(model, '_isComplete')) log.answered++; else log.missed++;
+            await sleep(200);
+        }
+        return { ready: true, ...log };
+    }
+
     // "Check Your Understanding" activities are practice: they are not part of the course grade.
     const PRACTICE = /check your understanding|проверьте (себя|свои знания|своё понимание)|проверка понимания|compruebe su comprensión/i;
     const isPractice = article => PRACTICE.test(articleState(article).title) || get(article, '_assessment')?._assessmentWeight === 0;
@@ -688,6 +772,7 @@
         try {
             if (data.request === 'complete') result = await completeModule();
             else if (data.request === 'quizzes') result = await runQuizzes(data.options || {});
+            else if (data.request === 'loose') result = await answerLooseQuestions();
             else if (data.request === 'texts') result = texts();
             else if (data.request === 'activeAssessment') result = { ready: true, articleId: activeAssessment() };
             else if (data.request === 'answerAssessment') result = await answerAssessment(data.options.articleId);

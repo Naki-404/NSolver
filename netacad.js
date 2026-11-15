@@ -934,7 +934,7 @@
             const done = module => module.percent !== null && module.percent >= 100;
             const outline = outlineModules({ checkpoints }).filter(module => !done(module) || (checkpoints && !module.checkpoint && !harvested.has(module.id)));
             const modules = outlineModules({ checkpoints }).length ? outline : [null]; // a course frame without the player outline
-            const summary = { modules: 0, materials: 0, passed: 0, failed: [] };
+            const summary = { modules: 0, materials: 0, questions: 0, passed: 0, failed: [] };
             for (const [i, module] of modules.entries()) {
                 if (state.autopilotStop) break;
                 const title = module ? module.title : current.title;
@@ -947,6 +947,9 @@
                 if (module && done(module)) continue; // finished: only its questions were wanted
                 const materials = await askMain('complete', 120000);
                 summary.materials += materials?.done || 0;
+                // Practice questions and lab surveys on the module pages count toward progress too.
+                const loose = await askMain('loose', 10 * 60 * 1000);
+                summary.questions += loose?.answered || 0;
                 const quizzes = await askMain('quizzes', 30 * 60 * 1000, { retakes });
                 for (const quiz of quizzes?.results || []) {
                     if (quiz.pass) summary.passed++;
@@ -956,7 +959,7 @@
                 await sleep(1000); // let the player send its tracking statements before the next module loads
             }
             console.log('[Naki] NetAcad autopilot:', summary);
-            const message = tr('autopilotDone', { modules: summary.modules, passed: summary.passed, failed: summary.failed.length, materials: summary.materials });
+            const message = tr('autopilotDone', { modules: summary.modules, passed: summary.passed, failed: summary.failed.length, materials: summary.materials, questions: summary.questions });
             ui.show(summary.failed.length ? 'info' : 'success', message, { lines: summary.failed.map((text, i) => ({ n: i + 1, text })) });
         } catch (error) {
             console.error('[Naki] NetAcad autopilot error:', error);
