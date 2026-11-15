@@ -713,7 +713,8 @@
             document.getElementById('submodule-button-' + module.id);
         if (first) first.click();
         else if (!module.checkpoint) return null; // an exam node may open on its own button (clicked above)
-        for (let i = 0; i < 50; i++) {
+        // A module with many pages can take a while to load: up to 40 s.
+        for (let i = 0; i < 100; i++) {
             await sleep(400);
             const status = await askMain('status', 3000);
             // Right after a switch the previous module may still be rendered: the course title must match too.
@@ -884,19 +885,22 @@
             }
             for (const [i, module] of modules.entries()) {
                 ui.show('info', tr('netacadSkipModule', { n: i + 1, total: modules.length, title: module.title }));
-                const status = await openModule(module);
-                if (!status) {
-                    failed.push(module.title);
-                    continue;
+                // A module is gone through until nothing is left in it (materials and page questions): a module that
+                // did not open, or still has something left, gets a second pass.
+                let status = null;
+                for (let pass = 0; pass < 2; pass++) {
+                    status = await openModule(module);
+                    if (!status) continue;
+                    if (pass === 0) await saveModuleTexts().catch(() => null);
+                    if (status.left) componentsDone += (await askMain('complete', 120000))?.done || 0;
+                    if (status.questions || pass > 0) await answerPageQuestions();
+                    await sleep(1500); // let the player send its tracking statements
+                    status = await askMain('status', 3000);
+                    if (status?.ready && !status.left && !status.questions) break;
                 }
-                await saveModuleTexts().catch(() => null);
-                if (status.left) {
-                    const result = await askMain('complete', 120000);
-                    componentsDone += result?.done || 0;
-                }
-                await answerPageQuestions();
-                await sleep(1000); // let the player send its tracking statements before the next module loads
-                modulesDone++;
+                if (!status?.ready) failed.push(module.title);
+                else if (status.left || status.questions) failed.push(`${module.title} (${tr('netacadSkipLeft', { n: status.left + status.questions })})`);
+                else modulesDone++;
             }
             console.log('[Naki] NetAcad course skip:', { modulesDone, componentsDone, questionsDone, failed });
             const message = tr('netacadSkipCourseDone', { modules: modulesDone, components: componentsDone, questions: questionsDone }) +

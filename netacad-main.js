@@ -71,7 +71,8 @@
             packageId: packageId(win),
             title: String(get(course, 'title') || ''),
             components: components.length,
-            left: skippable(course).length
+            left: skippable(course).length,
+            questions: looseQuestions(course).length // practice questions on the pages, not answered yet
         };
     }
 
@@ -261,14 +262,17 @@
     // their own _options[], _isCorrect in module data). Each item is a single-choice question
     // "<stem> — Which option matches "<item>"?": the bank (filled from module data) or the model answers it.
     const isObjectMatching = model => get(model, '_component') === 'objectMatching' && (get(model, 'categoryItems') || []).length > 0;
-    const isAdaptMatching = model => get(model, '_component') === 'matching' && (get(model, '_items') || []).some(item => Array.isArray(item._options));
+    // Adapt matching and its relatives with a dropdown per item: tableDropdown (a command built from dropdowns in a
+    // table) and fillBlanks (a sentence with dropdown blanks). Each item has its own _options with _isCorrect.
+    const isAdaptMatching = model => /^(matching|tableDropdown|fillBlanks)$/.test(get(model, '_component') || '') &&
+        (get(model, '_items') || []).some(item => Array.isArray(item._options));
     const isMatching = model => isObjectMatching(model) || isAdaptMatching(model);
     const matchingQuestion = (stem, label) => `${stem} — Which option matches "${label}"?`;
     function matchingParts(model) {
         const stem = plain(get(model, 'body')) || 'Match the items';
         if (isAdaptMatching(model)) {
             return (get(model, '_items') || []).map((item, k) => {
-                const label = plain(item.text || item.title);
+                const label = plain(item.text || item.title) || plain(`${item.preText || ''} ____ ${item.postText || ''}`.replace(/^\s*____\s*$/, '')) || `Item ${k + 1}`;
                 const options = (item._options || []).map(option => plain(option.text));
                 let correct = (item._options || []).flatMap((option, i) => (option._isCorrect === true ? [i] : []));
                 // A survey after a lab ("I feel confident…"): every option counts, "Agree" is taken.
@@ -311,7 +315,11 @@
         const model = view.model;
         const parts = matchingParts(model);
         const inside = allElements(view.shadowRoot || view);
-        let dropdowns = inside.filter(el => el.tagName === 'OBJECT-MATCHING-DROPDOWN-VIEW' || el.tagName === 'MATCHING-DROPDOWN-VIEW');
+        // One view per item, each with its own button and options; sorted by position, since items without a title
+        // are matched by their order.
+        const top = el => { const box = el.getBoundingClientRect(); return [box.top, box.left]; };
+        let dropdowns = inside.filter(el => /^(OBJECT-MATCHING|MATCHING|FILLBLANKS)-DROPDOWN-VIEW$|^TABLE-DROPDOWN-OPTIONS-VIEW$/.test(el.tagName))
+            .sort((a, b) => top(a)[0] - top(b)[0] || top(a)[1] - top(b)[1]);
         if (!dropdowns.length) dropdowns = inside.filter(el => el.matches('.matching__item') && el.querySelector('button.dropdown__btn'));
         // "Strongly Disagree, 1 of 6, not selected": the inner element's value attribute holds the option alone.
         const optionText = li => {
@@ -703,6 +711,23 @@
     // objectMatching: each category's "answer"), the bank or the model answers the rest. Every page of the module is
     // rendered at once; each question has its own Submit (js-btn-action). Verified on the Ethical Hacker course.
 
+    // A slider (a self-rating, "Rate the amount of risk…"): any value inside _correctRange counts. The starting value
+    // is kept when it is inside, otherwise the bottom of the range is set.
+    function answerSlider(view, model) {
+        const input = allElements(view.shadowRoot || view).find(el => el.matches('input[type="range"]'));
+        if (!input) return false;
+        const range = get(model, '_correctRange') || {};
+        const bottom = Number(range._bottom ?? get(model, '_scaleStart') ?? input.min);
+        const top = Number(range._top ?? get(model, '_scaleEnd') ?? input.max);
+        const value = Number(input.value);
+        if (!(value >= bottom && value <= top)) {
+            Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, String(bottom));
+            input.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+            input.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+        }
+        return true;
+    }
+
     function looseQuestions(course) {
         return course.getAllDescendantModels(true).filter(model => get(model, '_isQuestionType') && !get(model, '_isComplete') &&
             !get(model, '_isOptional') && get(model, '_isAvailable') !== false && !inAssessment(model));
@@ -744,6 +769,8 @@
             let ok;
             if (isMatching(model)) {
                 ok = await answerMatching(view);
+            } else if (get(model, '_component') === 'slider') {
+                ok = answerSlider(view, model);
             } else {
                 const items = get(model, '_items') || [];
                 const wanted = dataAnswer(model) || (batchAnswers.has(id) ? items.map((_, i) => batchAnswers.get(id).includes(i)) : null);
