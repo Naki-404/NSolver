@@ -322,6 +322,25 @@
             return plain(copy.textContent).toLowerCase();
         };
         let done = 0;
+        // A wide window shows objectMatching as two columns joined by lines (Categories A, B… / Options): a click on
+        // the category, then on its option, draws the line. Narrow windows get the dropdowns below instead.
+        const categoryButtons = inside.filter(el => el.matches('button.objectMatching-category-item'));
+        if (!dropdowns.length && categoryButtons.length) {
+            const same = (a, b) => plain(a).toLowerCase() === plain(b).toLowerCase();
+            for (const part of parts) {
+                const indices = part.correct || batchAnswers.get(part.id);
+                if (!indices?.length) continue;
+                const category = categoryButtons.find(el => same(el.querySelector('.category-item-text')?.textContent || el.textContent, part.category));
+                const option = inside.find(el => el.matches('button.objectMatching-option-item') && same(el.textContent, part.options[indices[0]]));
+                if (!category || !option) continue;
+                category.click();
+                await sleep(250);
+                option.click();
+                await sleep(350);
+                done++;
+            }
+            return done > 0;
+        }
         for (const dropdown of dropdowns) {
             const root = dropdown.shadowRoot || dropdown;
             const title = plain(root.querySelector('.matching__item-title_inner')?.textContent || '');
