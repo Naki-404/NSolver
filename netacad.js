@@ -868,14 +868,18 @@
                 return;
             }
             const modules = outlineModules().filter(module => module.percent === null || module.percent < 100);
-            let modulesDone = 0, componentsDone = 0;
+            let modulesDone = 0, componentsDone = 0, questionsDone = 0;
             const failed = [];
+            // Questions on the module pages (practice, checks, lab surveys) count toward progress: without them a
+            // module stops short of 100%. They are answered after the materials (netacad-main.js, from the data).
+            const answerPageQuestions = async () => { questionsDone += (await askMain('loose', 10 * 60 * 1000))?.answered || 0; };
             if (!outlineModules().length) {
                 // A course frame without the player outline: this module only.
                 ui.show('info', tr('netacadSkipModule', { n: 1, total: 1, title: current.title }));
                 await saveModuleTexts().catch(() => null);
                 const result = await askMain('complete', 120000);
                 componentsDone += result?.done || 0;
+                await answerPageQuestions();
                 modulesDone++;
             }
             for (const [i, module] of modules.entries()) {
@@ -889,12 +893,13 @@
                 if (status.left) {
                     const result = await askMain('complete', 120000);
                     componentsDone += result?.done || 0;
-                    await sleep(1000); // let the player send its tracking statements before the next module loads
                 }
+                await answerPageQuestions();
+                await sleep(1000); // let the player send its tracking statements before the next module loads
                 modulesDone++;
             }
-            console.log('[Naki] NetAcad course skip:', { modulesDone, componentsDone, failed });
-            const message = tr('netacadSkipCourseDone', { modules: modulesDone, components: componentsDone }) +
+            console.log('[Naki] NetAcad course skip:', { modulesDone, componentsDone, questionsDone, failed });
+            const message = tr('netacadSkipCourseDone', { modules: modulesDone, components: componentsDone, questions: questionsDone }) +
                 (failed.length ? tr('netacadSkipFailed', { list: failed.join(', ') }) : '');
             ui.show(failed.length && !modulesDone ? 'error' : 'success', message, { duration: 15000 });
         } catch (error) {
