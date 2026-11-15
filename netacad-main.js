@@ -98,8 +98,11 @@
     // question with its correct options (from the course data), which helps with quizzes built on the same topics.
 
     const courseOf = url => (url.match(/\/courses\/([^/]+)\/[^/]+\/[^/]+\/components\.json/) || [])[1] || null;
+    // Exhibits are pictures whose alt text describes them ("The exhibit is a screen capture of…"): kept as text.
     const plain = html => {
-        const text = new DOMParser().parseFromString(String(html || '').replace(/<\/(p|div|li|h[1-6]|tr|td|th)>|<br\s*\/?>/gi, '$& '), 'text/html').body.textContent || '';
+        const body = new DOMParser().parseFromString(String(html || '').replace(/<\/(p|div|li|h[1-6]|tr|td|th)>|<br\s*\/?>/gi, '$& '), 'text/html').body;
+        body.querySelectorAll('img[alt]').forEach(img => { if (img.alt.trim()) img.replaceWith(` [image: ${img.alt.trim()}] `); });
+        const text = body.textContent || '';
         return text.replace(/\{\{[^}]*\}\}/g, '').replace(/\s+/g, ' ').trim();
     };
 
@@ -686,9 +689,11 @@
             // One question after another: each one's answer (bank or model) when it arrives, Submit, wait for the next.
             await prefetchAnswers(articleId);
             await answerQuestions(articleId, log, { secure: true });
+            // Done when the "Submit My Assessment" screen shows; red questions in the strip were left unanswered.
             const doc = findCourse()?.win.document;
-            const left = doc && secureQuestion(doc) ? 1 : 0; // stopped on a question it could not answer
-            return { ready: true, ...log, secure: true, confirm: !left, left };
+            const confirm = !!(doc && findDeep(doc, el => el.id === 'confirm-exam' && visible(el)));
+            const left = doc ? allElements(doc).filter(el => el.matches('button.block-button') && /highlight/.test(el.className)).length : 0;
+            return { ready: true, ...log, secure: true, confirm, left: confirm ? left : Math.max(left, 1) };
         }
         if (!questionShown()) {
             clickVisible(current.doc, el => el.matches('.start-button') && belongsTo((el.getRootNode().host || {}).model || current.article, articleId));

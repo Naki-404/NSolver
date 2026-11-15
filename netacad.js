@@ -441,6 +441,7 @@
         console.log('[Naki] NetAcad assessment answered:', result);
         const answered = result?.answered || 0;
         if (result?.confirm && !(result.left > 0)) ui.show('success', tr('netacadExamReady', { n: answered, sec }), { duration: 0 });
+        else if (!answered && state.batchError) ui.show('error', tr('toastSolveError', { error: state.batchError }), { duration: 0 });
         else ui.show(answered ? 'info' : 'error', tr('netacadExamPartial', { n: answered, left: result?.left ?? '?' }), { duration: 0 });
         return answered > 0;
     }
@@ -790,16 +791,21 @@
             else unknown.push(question);
         }
         ui.show('info', tr('netacadBatch', { bank: questions.length - unknown.length, ai: unknown.length }));
+        state.batchError = null;
+        if (unknown.length && !Naki.activeKey(state.settings)) state.batchError = tr('toastNoKey');
         if (unknown.length && Naki.activeKey(state.settings)) {
             const settings = state.settings;
             const options = { provider: settings.provider, apiKey: Naki.activeKey(settings), modelId: Naki.activeModel(settings), lang: settings.lang, contextFor: await courseContext() };
             const asQuestion = q => ({ type: 'mcq', multiple: q.multiple, question: q.question, options: q.options });
-            let solutions = await ModelProvider.solveQuizQuestions(unknown.map(asQuestion), options)
-                .catch(error => { console.warn('[Naki] NetAcad quiz answers failed, asking question by question:', error.message); return null; });
+            // A failed request is shown in the card: without it the test just stays empty.
+            const failed = error => { state.batchError = error.message; console.warn('[Naki] NetAcad quiz answers failed:', error.message); return null; };
+            let solutions = await ModelProvider.solveQuizQuestions(unknown.map(asQuestion), options).catch(failed);
             if (!solutions) {
                 // One answer the model could not give must not cost the others.
-                solutions = await Promise.all(unknown.map(q => ModelProvider.solveQuizQuestions([asQuestion(q)], options).then(list => list[0]).catch(() => null)));
+                solutions = await Promise.all(unknown.map(q => ModelProvider.solveQuizQuestions([asQuestion(q)], options).then(list => list[0]).catch(failed)));
             }
+            if (solutions.some(Boolean)) state.batchError = null;
+            else if (state.batchError) ui.show('error', tr('toastSolveError', { error: state.batchError }));
             unknown.forEach((question, i) => {
                 const indices = solutions[i]?.correctOptionsIndex;
                 if (indices?.length) answers[question.id] = indices;
